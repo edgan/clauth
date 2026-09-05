@@ -57,6 +57,8 @@ const FEATURE_MAP: &[(&str, &[&str])] = &[
         // the token dashboard + its cost lens, the status feed.
         "Monitor",
         &[
+            "overlay_replaces_the_rounded_figure",
+            "a_reading_from_another_window_is_refused",
             "parses_",
             "retry_after",
             "cached_fallback_does_not_clobber",

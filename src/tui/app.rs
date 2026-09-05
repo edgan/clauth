@@ -2357,6 +2357,13 @@ impl App {
                 if let Some(s) = info_map.as_ref() {
                     p.usage = s.get(p.name.as_str()).cloned();
                 }
+                // Prefer the figure Claude Code itself renders over the rounded
+                // one `/usage` returns, whenever a live session has reported it
+                // (`statusline::overlay`). On the tick rather than the poll so a
+                // reading landing between polls shows on the next frame.
+                if let Some(info) = p.usage.as_mut() {
+                    crate::statusline::overlay(&p.name, info);
+                }
                 // OAuth fetch_status takes precedence; third-party only when no OAuth status.
                 if let Some(s) = status_map.as_ref()
                     && s.contains_key(p.name.as_str())

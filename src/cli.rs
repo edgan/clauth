@@ -160,6 +160,17 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Record the rate-limit windows Claude Code hands its status line
+    ///
+    /// Reads the status line's JSON payload on stdin and stores the 5h/7d
+    /// figures against the profile owning this session, so the display can show
+    /// the number Claude Code itself shows instead of the rounded one `/usage`
+    /// returns. Costs no request and no tokens.
+    ///
+    /// Prints nothing — a status line's stdout is the rendered line. Wire it in
+    /// by teeing the payload: `printf '%s' "$input" | clauth statusline &`.
+    Statusline,
+
     /// List accounts as a table with each profile's usage
     ///
     /// Reads the same on-disk usage caches `status --json` prints, so the

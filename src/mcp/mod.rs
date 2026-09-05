@@ -134,7 +134,13 @@ fn throughput_warnings(profile: &ProfileName, now: i64) -> Vec<serde_json::Value
 /// third-party cache itself for an account that has no such window.
 fn load_windows(name: &ProfileName) -> (Option<UsageWindow>, Option<UsageWindow>) {
     match load_profile_cache::<UsageInfo>(name, USAGE_CACHE_FILE) {
-        Some(u) => (u.five_hour, u.seven_day),
+        Some(mut u) => {
+            // Same figure the TUI and the status feed show, for the same reason
+            // (`statusline::overlay`): a delegate comparing headroom across
+            // accounts should read what Claude Code reads.
+            crate::statusline::overlay(name, &mut u);
+            (u.five_hour, u.seven_day)
+        }
         None => (None, None),
     }
 }

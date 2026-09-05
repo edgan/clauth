@@ -14,7 +14,7 @@ const BASH_TEMPLATE: &str = r#"_clauth() {
     if [ "$COMP_CWORD" -eq 1 ]; then
         local profiles
         profiles=$(clauth __complete 2>/dev/null)
-        COMPREPLY=( $(compgen -W "${profiles} start login delete disable enable rolling-token static-token which list jobs sessions resume info daemon status mcp herdr completions --theme" -- "${cur}") )
+        COMPREPLY=( $(compgen -W "${profiles} start login delete disable enable rolling-token static-token which statusline list jobs sessions resume info daemon status mcp herdr completions --theme" -- "${cur}") )
     elif [ "$prev" = "--theme" ]; then
         COMPREPLY=( $(compgen -W "full compatible" -- "${cur}") )
     elif [ "${COMP_WORDS[1]}" = "login" ] && [ "${cur:0:2}" = "--" ]; then
@@ -80,6 +80,7 @@ _clauth() {
             'rolling-token[serve a profile a rolling token from its usage chain]' \
             'static-token[restore the static setup-token mint, or --clear the long-lived token]' \
             'which[print profile owning the loaded credentials]' \
+            'statusline[record the rate-limit windows Claude Code reports on stdin]' \
             'list[list accounts as a table with per-profile usage]' \
             'jobs[list the delegate jobs clauth is holding (add --json)]' \
             'sessions[list Claude Code sessions (add --json / --tokens)]' \
@@ -164,6 +165,7 @@ complete -c clauth -f -n __fish_is_first_token -a enable -d "Restore a disabled 
 complete -c clauth -f -n __fish_is_first_token -a rolling-token -d "Serve a profile a rolling token from its usage chain"
 complete -c clauth -f -n __fish_is_first_token -a static-token -d "Restore the static setup-token mint, or --clear the long-lived token"
 complete -c clauth -f -n __fish_is_first_token -a which -d "Print profile owning the loaded credentials"
+complete -c clauth -f -n __fish_is_first_token -a statusline -d "Record the rate-limit windows Claude Code reports on stdin"
 complete -c clauth -f -n __fish_is_first_token -a list -d "List accounts as a table with per-profile usage"
 complete -c clauth -f -n __fish_is_first_token -a jobs -d "List the delegate jobs clauth is holding"
 complete -c clauth -f -n __fish_is_first_token -a sessions -d "List Claude Code sessions"

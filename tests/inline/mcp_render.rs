@@ -77,7 +77,7 @@ fn third_party_headline_joins_bars_with_plan_prefix() {
         vec![],
         Some("pro"),
     );
-    assert_eq!(third_party_headline(&s), "pro: prompts 50%, tokens 12.4%");
+    assert_eq!(third_party_headline(&s), "pro: prompts 50%, tokens 12%");
 }
 
 #[test]
@@ -596,7 +596,7 @@ fn live_usage_prose_names_every_window_and_warns() {
         &serde_json::json!({"profile": "work", "5h_used_pct": 12.3, "7d_used_pct": 45.6}),
         "target",
     );
-    assert_eq!(full, "target `work`: 5h 12.3% used, 7d 45.6% used");
+    assert_eq!(full, "target `work`: 5h 12% used, 7d 45% used");
 
     // A null window reads `unknown` (never drops out as if it were zero), and
     // carries no age even when a cache file exists to take one from: an age
@@ -632,7 +632,7 @@ fn live_usage_prose_names_every_window_and_warns() {
     );
     assert_eq!(
         warned,
-        "target `work`: 5h 12% used, 7d 45.6% used; ⚠ deepseek-chat slow (~40 tok/s)"
+        "target `work`: 5h 12% used, 7d 45% used; ⚠ deepseek-chat slow (~40 tok/s)"
     );
 }
 
@@ -1985,7 +1985,7 @@ fn delegate_prose_renders_background_and_sync_envelope() {
     });
     assert_eq!(
         delegate_prose(&sync),
-        "delegate to `work` finished: all done (cost $0.5), usage: input 100 tokens, output 50 tokens; target `work`: 5h 12% used, 7d 45.6% used"
+        "delegate to `work` finished: all done (cost $0.5), usage: input 100 tokens, output 50 tokens; target `work`: 5h 12% used, 7d 45% used"
     );
 }
 
@@ -2011,7 +2011,7 @@ fn delegate_prose_background_handle_carries_the_footer_and_the_digest() {
     });
     assert_eq!(
         delegate_prose(&bg),
-        "delegate to `work` running, job `d-42-0`; target `work`: 5h 12% used, 7d 45.6% used \
+        "delegate to `work` running, job `d-42-0`; target `work`: 5h 12% used, 7d 45% used \
          (cached 1m ago); since your last call: usage cache refreshed"
     );
 }
@@ -2053,7 +2053,7 @@ fn delegate_fanout_prose_carries_headroom_per_target_and_one_digest() {
     assert_eq!(
         delegate_fanout_prose(&fanout),
         "delegated to `solo` (job `d-7-0`), `vendor` (job `d-7-1`); \
-         target `solo`: 5h 12% used, 7d 45.6% used; \
+         target `solo`: 5h 12% used, 7d 45% used; \
          target `vendor`: no 5h/7d limits; api balance: 31.45 USD; \
          since your last call: credentials file rewritten",
     );
@@ -2091,7 +2091,7 @@ fn delegate_fanout_results_prose_names_each_row_and_digest_last() {
     });
     assert_eq!(
         delegate_fanout_results_prose(&payload),
-        "delegate to `solo` finished: ok; target `solo`: 5h 12% used, 7d 45.6% used\n\
+        "delegate to `solo` finished: ok; target `solo`: 5h 12% used, 7d 45% used\n\
          delegate to `vendor` finished: done; target `vendor`: no 5h/7d limits; api balance: 31.45 USD\n\
          since your last call: credentials file rewritten",
     );
@@ -2303,7 +2303,7 @@ fn monitor_job_prose_renders_running_invalid_and_done() {
     });
     assert_eq!(
         monitor_job_prose(&done),
-        "delegate to `work` finished: done (cost $1.25); target `work`: 5h 12% used, 7d 45.6% used"
+        "delegate to `work` finished: done (cost $1.25); target `work`: 5h 12% used, 7d 45% used"
     );
 }
 

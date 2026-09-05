@@ -40,6 +40,12 @@ pub(crate) const ADOPT_REFUSAL_FILE: &str = "adopt_refusal.json";
 /// `/profile` for every profile at once.
 pub(crate) const PROFILE_FETCHED_CACHE_FILE: &str = "profile_fetched.json";
 
+/// The most recent rate-limit windows Claude Code handed this profile's status
+/// line (`statusline::LiveUsage`). Written by the `clauth statusline` hook, read
+/// on the display path to overlay the polled `/usage` figures with the ones
+/// Claude Code itself floors. Absent for every profile with no live session.
+pub(crate) const STATUSLINE_CACHE_FILE: &str = "statusline_usage.json";
+
 /// Per-profile kick-429 block (`usage::scheduler::KickBlock`): written by the
 /// fetching instance so a standdown TUI can mirror the judgment and a restart
 /// doesn't forget a live block mid-outage; removed the moment a kick lands.

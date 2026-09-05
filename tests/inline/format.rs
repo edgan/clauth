@@ -344,15 +344,37 @@ fn resolve_in_tui_names_the_clauth_surface() {
 }
 
 #[test]
-fn format_pct_drops_trailing_zero_on_whole_numbers() {
+fn format_pct_renders_whole_numbers_without_a_decimal() {
     assert_eq!(format_pct(42.0), "42%");
     assert_eq!(format_pct(0.0), "0%");
     assert_eq!(format_pct(100.0), "100%");
 }
 
+// Claude Code's own `/usage` prints `Math.floor(utilization)`, so a window it
+// calls 42% must not read 43% here — the fraction is dropped, never rounded up.
 #[test]
-fn format_pct_shows_fractional_percent() {
-    assert_eq!(format_pct(42.3), "42.3%");
+fn format_pct_floors_a_fractional_percent_like_claude_code() {
+    assert_eq!(format_pct(42.3), "42%");
+    assert_eq!(format_pct(42.7), "42%");
+    assert_eq!(format_pct(99.9), "99%");
+    assert_eq!(format_pct(0.4), "0%");
+}
+
+// 100% is the one reading that means "spent", so it may only appear once the
+// window actually reaches it.
+#[test]
+fn format_pct_reserves_a_hundred_for_a_genuinely_spent_window() {
+    assert_eq!(format_pct(99.5), "99%");
+    assert_eq!(format_pct(100.0), "100%");
+}
+
+// A garbage reading off the wire must format, not panic: `as i64` saturates
+// and maps NaN to 0.
+#[test]
+fn pct_whole_survives_a_nonsense_reading() {
+    assert_eq!(pct_whole(f64::NAN), 0);
+    assert_eq!(pct_whole(f64::INFINITY), i64::MAX);
+    assert_eq!(pct_whole(-0.5), -1);
 }
 
 /// `local_stamp` is the one prose-stamp formatter: epoch seconds → `YYYY-MM-DD

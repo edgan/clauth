@@ -35,6 +35,7 @@ use crate::fallback::{
     BlockedReason, DEFAULT_THRESHOLD, blocked_reason, health_blocked_reason, soonest_resume,
     spend_is_uncapped, spend_room, threshold_for, uncapped_spend_fix,
 };
+use crate::format::pct_whole;
 use crate::profile::AppConfig;
 use crate::usage::{humanize_duration, switch_grade_kick_lifts};
 
@@ -341,17 +342,17 @@ fn reason_pill_spans(reason: &BlockedReason, fmt: ResetFmt) -> Vec<Span<'static>
             (DIAG_BUDGET_SPENT.to_string(), theme::warning().bold(), None)
         }
         BlockedReason::FiveHour { pct, resets_in } => (
-            format!("5h {pct:.0}%"),
+            format!("5h {}%", pct_whole(*pct)),
             theme::warning().bold(),
             resets_in.as_ref().map(|s| reset_pill(*s, fmt)),
         ),
         BlockedReason::ScopedSpent { label, pct } => (
-            format!("{label} {pct:.0}%"),
+            format!("{label} {}%", pct_whole(*pct)),
             theme::warning().bold(),
             Some("other models ok".to_string()),
         ),
         BlockedReason::WeeklySoft { pct } => (
-            format!("weekly {pct:.0}%"),
+            format!("weekly {}%", pct_whole(*pct)),
             theme::warning().bold(),
             Some("still serving".to_string()),
         ),
@@ -580,7 +581,10 @@ fn member_detail(
     )];
     gauge_spans.extend(gauge_with_tick(pct, Some(threshold)));
     if let Some(v) = pct {
-        gauge_spans.push(Span::styled(format!("  {v:.0}% used"), theme::util(v)));
+        gauge_spans.push(Span::styled(
+            format!("  {}% used", pct_whole(v)),
+            theme::util(v),
+        ));
     } else {
         gauge_spans.push(Span::styled("  no data yet", theme::faint()));
     }
@@ -592,7 +596,12 @@ fn member_detail(
         lines.push(Line::from(vec![
             Span::raw(" ".repeat(KEY_W + KEY_GUTTER)),
             Span::styled(
-                format!("{:.0}% until rotate", (threshold - v).max(0.0)),
+                // Off the SHOWN figure, not the raw one, so the two lines add
+                // up to the threshold the gauge is drawn against.
+                format!(
+                    "{}% until rotate",
+                    (pct_whole(threshold) - pct_whole(v)).max(0)
+                ),
                 theme::faint(),
             ),
         ]));

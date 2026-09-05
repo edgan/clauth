@@ -197,10 +197,17 @@ fn windows_of(name: &ProfileName, third_party: bool, provider: Option<Provider>)
             provider,
         };
     }
-    ProfileWindows::Oauth {
-        usage: load_profile_cache::<UsageInfo>(name, file).map(Box::new),
-        age_secs,
-    }
+    // The status-line overlay rides the READ, not any one caller. Upstream's
+    // rewrite made this the single place an OAuth usage cache is loaded for
+    // publication, so applying it here is what keeps `clauth list`, the daemon's
+    // status feed, the HTTP API and the MCP payloads all showing the same
+    // floored figure the TUI does — the property the old `windows_json` call
+    // site held before that function was replaced.
+    let usage = load_profile_cache::<UsageInfo>(name, file).map(|mut u| {
+        crate::statusline::overlay(name, &mut u);
+        Box::new(u)
+    });
+    ProfileWindows::Oauth { usage, age_secs }
 }
 
 /// Seconds since `file` was last written for `name`; `None` when it is absent,
