@@ -158,6 +158,14 @@ fn col_width<'a>(header: &str, cells: impl Iterator<Item = &'a str>) -> usize {
 
 fn render_table(config: &AppConfig, entries: &[ProfileEntry]) -> String {
     if entries.is_empty() {
+        // On a replica `clauth login` is refused, so pointing at it would send
+        // the operator somewhere that turns them away. An empty roster there
+        // means the first pull has not landed yet.
+        if crate::proxy::is_replica() {
+            return "no accounts yet. this host mirrors an origin, so they arrive on the \
+                    first `clauth proxy` pull.\n"
+                .to_string();
+        }
         return "no accounts yet. add one with `clauth login <name>`.\n".to_string();
     }
 

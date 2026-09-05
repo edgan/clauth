@@ -34,6 +34,7 @@ mod profile;
 mod profile_cache;
 mod profile_json;
 mod providers;
+mod proxy;
 mod runtime;
 mod sessions;
 mod sessions_cli;
@@ -163,14 +164,36 @@ fn dispatch(cli: Cli) -> Result<()> {
     };
 
     match command {
-        Command::Start(a) => cmd_start(&a.profile, &a.claude_args, a.isolation(), a.with_fallback),
-        Command::Login(a) => cmd_login(a),
+        Command::Start(a) => {
+            // Everything else about `start` works on a replica; the chain walk
+            // does not. `--with-fallback` needs a local daemon to decide the
+            // hops, and a replica has none by construction -- refused by name
+            // at launch, like that flag's other unsupported cases.
+            if a.with_fallback && proxy::is_replica() {
+                return Err(usage_error(
+                    "`--with-fallback` needs a local daemon to decide the switches, and this \
+                     host mirrors an origin instead. Start without it; the account this session \
+                     runs on follows whatever the origin has active",
+                ));
+            }
+            cmd_start(&a.profile, &a.claude_args, a.isolation(), a.with_fallback)
+        }
+        Command::Login(a) => {
+            proxy::refuse_if_replica("log in")?;
+            cmd_login(a)
+        }
         Command::Delete {
             profile,
             yes,
             force,
-        } => cmd_delete(&profile, yes, force),
-        Command::Disable { profile, yes } => cmd_disable(&profile, yes),
+        } => {
+            proxy::refuse_if_replica("delete the account")?;
+            cmd_delete(&profile, yes, force)
+        }
+        Command::Disable { profile, yes } => {
+            proxy::refuse_if_replica("disable the account")?;
+            cmd_disable(&profile, yes)
+        }
         Command::StaticToken {
             profile,
             clear,
@@ -182,7 +205,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                 cmd_static_token(&profile)
             }
         }
-        Command::Enable { profile } => cmd_enable(&profile),
+        Command::Enable { profile } => {
+            proxy::refuse_if_replica("enable the account")?;
+            cmd_enable(&profile)
+        }
         Command::RollingToken { profile } => cmd_rolling_token(&profile),
         Command::Which { json } => which::run(json),
         Command::List { all, disabled } => list::run(all || disabled),
@@ -212,6 +238,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             listen,
             daemon::api::tls::CertSource::from_flags(cert, key),
         ),
+        Command::Proxy(a) => proxy::run(&a),
         Command::Status {
             json: _,
             all,
@@ -258,12 +285,20 @@ fn cmd_daemon(
         Ok(())
     } else if status {
         daemon::status_probe()
-    } else if replace {
-        daemon::serve(daemon::StartMode::Replace, listen, &certs)
-    } else if standby {
-        daemon::serve(daemon::StartMode::Standby, listen, &certs)
     } else {
-        daemon::serve(daemon::StartMode::ExitIfRunning, listen, &certs)
+        // Only the serving arms are refused on a replica: the origin polls and
+        // rotates, and a second scheduler on the same accounts is the
+        // double-refresh this whole feature exists to avoid. The arms above are
+        // reads and answer here exactly as anywhere else.
+        proxy::refuse_if_replica("run the daemon")?;
+        let mode = if replace {
+            daemon::StartMode::Replace
+        } else if standby {
+            daemon::StartMode::Standby
+        } else {
+            daemon::StartMode::ExitIfRunning
+        };
+        daemon::serve(mode, listen, &certs)
     }
 }
 
@@ -306,7 +341,13 @@ fn cmd_run() -> Result<()> {
 // is distinguishable from success to a calling script.
 fn cmd_external(words: &[String]) -> Result<()> {
     match words {
-        [name] => cmd_switch(name),
+        [name] => {
+            // The origin decides which account is active; this host follows it
+            // on the next pull. Switching here would be undone within the
+            // interval anyway, so refusing beats surprising.
+            proxy::refuse_if_replica("switch")?;
+            cmd_switch(name)
+        }
         _ => Err(usage_error(format!(
             "unrecognized command '{}'; run `clauth --help` for the command list",
             words.join(" ")

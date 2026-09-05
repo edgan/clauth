@@ -38,7 +38,7 @@ Most account tools do one half. clauth pairs instant **switching between multipl
 - 🤖 **Auto-switch** down a fallback chain the moment an account hits its limit, with weekly-window and spend-ceiling gates so a long run never stalls and never surprises you with a bill. Opted-in accounts queue their auto-start, opening 5h windows `5h / accounts` apart instead of all at once
 - 🧩 **Run in parallel**: several accounts at once in isolated config dirs, or a clean headless session with none of your global memory, plugins, or hooks
 - 🔌 **From inside Claude**: an MCP plugin lets a live session list, switch, or delegate a whole prompt (even headless) to another account, and tells a session when the account behind it changed
-- 🖥️ **Headless**: `clauth daemon` runs the refresh and auto-switch loop with no TUI and publishes `status.json` for a menu-bar app to read, or serves that feed and the account switch to another machine over HTTPS with `--listen`
+- 🖥️ **Headless**: `clauth daemon` runs the refresh and auto-switch loop with no TUI and publishes `status.json` for a menu-bar app to read, or serves that feed, the account switch, and the accounts themselves to another machine over HTTPS with `--listen`, so `clauth proxy` on a second machine runs Claude Code against the same accounts without the refresh token ever leaving the first
 - 🛠️ **Quality-of-life**: browse and resume past sessions under any account, per-profile model routing, shell completions, signed self-updates, multi-instance safe
 
 Full reference: **[the wiki](https://github.com/uwuclxdy/clauth/wiki)**.
@@ -102,6 +102,7 @@ clauth start --isolated personal -p < prompt.txt
 | `clauth list` / `clauth which` | account table with cached usage / who owns this session |
 | `clauth sessions`, `resume`, `info` | browse past Claude Code sessions and resume one anywhere |
 | `clauth daemon` | headless refresh + auto-switch loop, optionally serving the REST API (`--listen`) |
+| `clauth proxy` | mirror another machine's accounts onto this one and follow it |
 
 Every command and flag: [Quickstart](https://github.com/uwuclxdy/clauth/wiki/Quickstart#commands).
 

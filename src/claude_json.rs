@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::jsonsync::{KeyPath, KeyRule};
-use crate::profile::{AccountId, atomic_write, home_dir};
+use crate::profile::{AccountId, atomic_write, atomic_write_600, home_dir};
 
 /// Account-specific keys that must never propagate between profiles.
 const PER_PROFILE_FIELDS: &[&str] = &[
@@ -141,6 +141,64 @@ pub(crate) fn strip_home_oauth_account() -> Result<()> {
     }
     let bytes = serde_json::to_vec_pretty(&Value::Object(obj))
         .context("failed to serialize .claude.json after stripping oauthAccount")?;
+    atomic_write(&path, &bytes).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Record that Claude Code's first-run onboarding is done, so a replica can
+/// actually start it.
+///
+/// A replica is handed a working login it never typed: `clauth login` is
+/// refused there, and the mirrored pair carries no refresh token to log in
+/// WITH. But Claude Code gates its first run on `hasCompletedOnboarding` in
+/// `~/.claude.json`, not on whether it can authenticate — so on a machine that
+/// has never run it, it asks for a login it does not need. Observed on a fresh
+/// replica 2026-09-04: `oauthAccount` was populated from a SUCCESSFUL profile
+/// fetch in the same second as `firstStartTime`, and it still prompted. Nothing
+/// else in clauth writes this key, so every new replica would hit it.
+///
+/// Same read-then-parse discipline as [`strip_home_oauth_account`], with one
+/// deliberate difference: this CREATES the file when it is absent, where the
+/// strip never would. It has to. The flag is read on Claude Code's FIRST start,
+/// so a seed that waited for Claude Code to write the file would always be one
+/// run too late — which is the failure this exists to prevent. The created file
+/// carries nothing but the flag; Claude Code's own bootstrap fills in the rest,
+/// the way it already tolerates a file with no `oauthAccount`.
+///
+/// A file that already reads `true` is NOT rewritten, and that is load-bearing
+/// rather than an optimisation: [`sync_once`] resolves by newest mtime, so a
+/// touch on every pull would make home win every tick and stomp each runtime
+/// copy's own fields — the same trap the strip documents.
+///
+/// The flag is not in [`PER_PROFILE_FIELDS`], so once it is here [`sync_once`]
+/// carries it to the shared runtime copies and `runtime::seed_claude_json`
+/// copies it into new ones: `clauth start` on a replica stops prompting too.
+pub(crate) fn seed_home_onboarding() -> Result<()> {
+    const FLAG: &str = "hasCompletedOnboarding";
+
+    let path = home_dir()?.join(".claude.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        // Absent — create, unlike every other reader of this file. Owner-only
+        // on the way in, matching `runtime::seed_claude_json`: Claude Code owns
+        // the mode from its first write onward, so this only decides the window
+        // before that.
+        let mut obj = serde_json::Map::new();
+        obj.insert(FLAG.to_string(), Value::Bool(true));
+        let seeded = serde_json::to_vec_pretty(&Value::Object(obj))
+            .context("failed to serialize a seeded .claude.json")?;
+        return atomic_write_600(&path, &seeded)
+            .with_context(|| format!("failed to write {}", path.display()));
+    };
+    let Ok(Value::Object(mut obj)) = serde_json::from_slice::<Value>(&bytes) else {
+        return Ok(()); // unparseable (CC mid-write) or not an object — never clobber
+    };
+    if obj.get(FLAG) == Some(&Value::Bool(true)) {
+        return Ok(()); // already onboarded — avoid a pointless mtime bump
+    }
+    // Absent, or the `false` a half-finished onboarding leaves behind. Either
+    // way the login it would ask for is one this host cannot perform.
+    obj.insert(FLAG.to_string(), Value::Bool(true));
+    let bytes = serde_json::to_vec_pretty(&Value::Object(obj))
+        .context("failed to serialize .claude.json after seeding the onboarding flag")?;
     atomic_write(&path, &bytes).with_context(|| format!("failed to write {}", path.display()))
 }
 

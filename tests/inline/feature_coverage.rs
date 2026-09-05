@@ -151,10 +151,10 @@ const FEATURE_MAP: &[(&str, &[&str])] = &[
             "live_session_included",
             "force_true_bypasses",
             "rotation_guard_is_independent",
-            // `--listen`: the REST API the Headless bullet claims serves the
-            // feed and the switch to another machine. The bullet said that while
-            // this list named none of it, so the routes, their auth, and the TLS
-            // listener under them all counted as uncovered.
+            // `--listen`: the REST API the bullet claims serves the feed, the
+            // switch and the accounts to another machine. The bullet said all of
+            // that while this list named only the mirror half, so the routes,
+            // their auth, and the TLS listener under them counted as uncovered.
             "every_route_requires_the_token",
             "only_the_api_v1_prefix_is_served",
             "an_unknown_path_is_404_and_a_wrong_method_is_405",
@@ -169,6 +169,14 @@ const FEATURE_MAP: &[(&str, &[&str])] = &[
             "a_content_length_that_is_not_bare_digits",
             "cert_source_is_explicit_only_when_both_files_are_named",
             "a_missing_certificate_fails_in_prepare_not_after_the_claim",
+            // `/api/v1/mirror` + `clauth proxy` (the replica): the refresh token
+            // never crosses, and a replica never runs a second refresher
+            // against the origin's accounts.
+            "the_mirror_body_never_carries_a_refresh_token",
+            "from_disk_strips_the_refresh_token_it_reads",
+            "the_usage_refresher_stays_down_on_a_replica",
+            "a_traversing_profile_name_is_refused",
+            "a_local_only_profile_survives_a_prune",
             // rolling session token (#59): the daemon leg — the tick that
             // re-stamps the sidecar and the gate it goes through.
             "claude_rolling_tick_",

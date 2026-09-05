@@ -3187,6 +3187,17 @@ pub(crate) fn spawn_refresher(
     shutting_down: Arc<AtomicBool>,
     fetch_lease: Arc<crate::daemon::FetchLease>,
 ) {
+    // A replica polls nothing and rotates nothing: the origin owns both legs,
+    // and a second scheduler on the same accounts is exactly the double-refresh
+    // `clauth proxy` exists to prevent. The gate lives HERE rather than at the
+    // two call sites so neither the daemon nor the TUI can grow a path that
+    // forgets it -- and so a mirrored host stays quiet merely by opening the
+    // TUI, which is the way an operator would otherwise trip it.
+    if crate::proxy::is_replica() {
+        logline!("clauth: this host mirrors an origin, so the usage refresher stays down");
+        return;
+    }
+
     // Seed kick blocks from the per-profile cache files on the CALLING thread
     // so a restart mid-outage resumes the decayed retry clock instead of
     // hammering. Must happen here, not inside the spawned closure below:

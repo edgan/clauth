@@ -14,6 +14,7 @@ The [README](https://github.com/uwuclxdy/clauth#readme) is the tour. This wiki i
 | [Configuration](Configuration) | `profiles.toml`, per-profile `config.toml`, model routing, storage layout |
 | [Auto-switch](Auto-Switch) | the fallback chain: thresholds, gates, burn-aware mode, spend ceilings |
 | [Daemon](Daemon) | `clauth daemon`, the `status.json` read contract for external readers |
+| [Proxy](Proxy) | `clauth proxy`: running one set of accounts on more than one machine |
 | [Claude Code plugin](Claude-Code-Plugin) | the MCP server, its four tools, `delegate` in full |
 | [herdr plugin](Herdr-Plugin) | the clauth popup in herdr, the key, the per-pane account tag |
 | [Tokens and cost](Tokens-And-Cost) | where the token dashboard reads from, what the cost figure means |
@@ -26,4 +27,5 @@ The [README](https://github.com/uwuclxdy/clauth#readme) is the tour. This wiki i
 - Most settings in those files are editable in the TUI too: `clauth`, then the Setup / Fallback / Config / Plugin tabs.
 - A switch rewrites `~/.claude/.credentials.json`, parts of `~/.claude/settings.json`, and the stale identity block in `~/.claude.json`. Nothing else in `~/.claude/` moves.
 - `clauth start <profile>` runs a session in its own config dir, so it never disturbs the account your global `claude` is on.
+- `clauth proxy` mirrors another machine's accounts onto this one. The refresh token never crosses, so a replica can spend an account but never rotate its chain.
 - Trust model, network activity, and vulnerability reporting: [SECURITY.md](https://github.com/uwuclxdy/clauth/blob/mommy/SECURITY.md).

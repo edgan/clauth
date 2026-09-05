@@ -45,8 +45,8 @@ exactly as the scheduler and the MCP tool refuse them.
 
 ## REST API (`--listen`)
 
-`clauth daemon --listen 0.0.0.0:8443` also serves the feed and the switch over
-HTTPS, for running the daemon on one machine and a client (clauth-tray) on
+`clauth daemon --listen 0.0.0.0:8443` also serves the feed, the switch, and the
+accounts themselves over HTTPS, for running the daemon on one machine and a client (clauth-tray) on
 another. Off unless the flag is passed. TLS comes from this host's
 [lego](https://github.com/go-acme/lego) certificate, on all three platforms
 clauth supports — macOS, Linux, and Windows. Only two things differ by platform:
@@ -157,6 +157,16 @@ hosts where it cannot work.
   to pass both, since a `--replace` on its own takes over without a listener.
   Nothing warns you in advance: a certificate that expires under a running
   daemon produces client-side TLS errors, not a clauth log line.
+- **The listener serves the accounts, not just the feed.** `GET /api/v1/mirror`
+  hands this host's accounts to a [`clauth proxy`](Proxy) on another machine, and
+  it is on whenever the daemon is listening at all. So the bearer token is not
+  only a read-the-feed-and-switch credential: anything holding it can read
+  accounts from this daemon. What crosses is an **access token, with the refresh
+  token left out of the body entirely**: Anthropic's refresh chain is single-use,
+  so a second machine holding a refresh token can revoke this one's copy simply
+  by using it. A replica can therefore spend an account but can never advance its
+  chain. Access tokens last about eight hours and are replaced on the replica's
+  next pull.
 - **The token.** 32 CSPRNG bytes through SHA-256, hex, so 64 characters.
   Generated on first use and stored at `~/.clauth/auth_token.json` (0600), so it
   survives restarts and only has to be copied to the client once.
@@ -169,15 +179,15 @@ hosts where it cannot work.
   observable in the timing.
 - **The file records a tier**, `"tier": "control"`, which is the only value there
   is: this token does everything the API exposes. It is written now so that a
-  narrower token later — read-only for a wall display, for instance — is a new
-  value in a field every deployed file already carries rather than a schema bump
-  with a migration behind it. A file from before the field reads as `control`,
-  which is what it was, so an upgrade rotates nothing. A tier this build does
-  *not* know refuses to start and leaves the file alone: serving it would promote
-  a token a newer clauth deliberately restricted, and replacing it would revoke,
-  from a downgrade, a credential you had distributed on purpose. A file that is
-  unusable for any other reason — bad JSON, a truncated token — is replaced, and
-  now says so in the log rather than silently 401ing every client.
+  narrower token later — read-only for a wall display, mirror-only for a replica
+  — is a new value in a field every deployed file already carries rather than a
+  schema bump with a migration behind it. A file from before the field reads as
+  `control`, which is what it was, so an upgrade rotates nothing. A tier this
+  build does *not* know refuses to start and leaves the file alone: serving it
+  would promote a token a newer clauth deliberately restricted, and replacing it
+  would revoke, from a downgrade, a credential you had distributed on purpose.
+  A file that is unusable for any other reason — bad JSON, a truncated token — is
+  replaced, and now says so in the log rather than silently 401ing every client.
 - **Every route needs it**, health included. An unauthenticated caller gets a
   401 and learns only that something is listening, which is all a liveness probe
   needs. A 401 also closes the connection rather than keeping it alive, so an
@@ -195,6 +205,7 @@ hosts where it cannot work.
 | `GET /api/v1/health` | `{"ok":true,"version":"<ver>","schema":1}`. `schema` is the status feed's, so a reader can refuse a daemon newer than it knows. |
 | `GET /api/v1/status` | The `status.json` body below, byte for byte off disk. Conditional: the `ETag` digests everything in the body except `generated_at`, so a feed rewritten by a tick that changed nothing answers `304` with no body. `?wait=<secs>` on a request already carrying the current tag holds it open until the accounts actually move (capped at 60s, inside the connection's own 120s lifetime), which is how a client follows a switch without polling. `?all=1` rebuilds the body to include disabled accounts, which the published file always hides, and never waits. |
 | `POST /api/v1/switch` | Body `{"profile":"<name>"}` (resolved case-insensitively). Returns `{"ok":true,"previous":…,"active":…}`. Republishes `status.json` before answering, so every reader parked on `GET /api/v1/status?wait=` is woken by the same switch rather than by the next tick. |
+| `GET /api/v1/mirror` | One consistent snapshot of this host's accounts, for a [`clauth proxy`](Proxy) elsewhere. Conditional: the `ETag` digests the accounts and not the timestamp, so an unchanged origin answers `304` with no body. `?wait=<secs>` on a request already carrying the current tag holds it open until the accounts move (capped at 60s, inside the connection's own 120s lifetime), which is how a replica follows a switch without polling. **The refresh token never crosses**, see below. |
 
 `POST /api/v1/switch` failures: `404` unknown profile · `409` refused, because the
 target is disabled, its credentials were rejected by a refresh, or the live

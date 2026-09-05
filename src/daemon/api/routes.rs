@@ -89,10 +89,11 @@ pub(crate) fn handle(ctx: &ApiContext, req: &Request) -> Response {
         ("GET", "/health") => health(),
         ("GET", "/status") => status(ctx, req),
         ("POST", "/switch") => switch(ctx, req),
+        ("GET", "/mirror") => mirror(req),
         // A known path reached with the wrong method is 405, so a client with a
         // typo'd verb gets told which half is wrong.
         (_, "/health" | "/status") => Response::error(405, "method_not_allowed"),
-        (_, "/switch") => Response::error(405, "method_not_allowed"),
+        (_, "/switch" | "/mirror") => Response::error(405, "method_not_allowed"),
         _ => Response::error(404, "not_found"),
     }
 }
@@ -116,9 +117,9 @@ fn health() -> Response {
 /// `?all=1` and a missing file both fall back to building a body here, which is
 /// the same `build_status` the file itself came from.
 ///
-/// Conditional, and optionally BLOCKING: `?wait=` with a matching
-/// `If-None-Match` holds the request open until the feed's content actually
-/// changes. That is what turns a client's account display from
+/// Conditional, and optionally BLOCKING, exactly as `/api/v1/mirror` is: `?wait=`
+/// with a matching `If-None-Match` holds the request open until the feed's
+/// content actually changes. That is what turns a client's account display from
 /// "correct within its poll interval" into "correct within a round trip", and
 /// with `POST /api/v1/switch` republishing the file itself, a switch made through
 /// the API wakes every waiting reader immediately.
@@ -179,10 +180,11 @@ fn status(ctx: &ApiContext, req: &Request) -> Response {
 
 /// Block until `status.json`'s content leaves `tag`, or `wait` elapses.
 ///
-/// Content, not mtime. The feed is a single small file, so re-reading and
-/// digesting it every [`WAIT_POLL`] costs almost nothing — and unlike an mtime
-/// it cannot be fooled. (A filesystem that stamps two writes microseconds apart
-/// with one mtime is not hypothetical; comparing content is immune to it.)
+/// Simpler than the mirror's two-stage gate on purpose: the feed is a single
+/// small file, so re-reading and digesting it every [`WAIT_POLL`] is cheaper
+/// than the stat walk the mirror needs — and it cannot be fooled the way an
+/// mtime can. (A filesystem that stamps two writes microseconds apart with one
+/// mtime is not hypothetical; comparing content is immune to it.)
 fn wait_for_status_change(ctx: &ApiContext, tag: &str, wait: Duration) -> Response {
     let deadline = std::time::Instant::now() + wait;
     loop {
@@ -233,13 +235,119 @@ fn etag_for(body: &[u8]) -> String {
     )
 }
 
+/// `GET /api/v1/mirror` — one consistent snapshot of this host's accounts, for a
+/// `clauth proxy` on another machine.
+///
+/// Served whenever the daemon is listening at all, like the other two routes.
+/// Consent lives entirely in `--listen`: nothing is reachable without it, and
+/// the bearer token that guards the feed and the switch guards this too, so
+/// holding that token means being able to read this host's accounts.
+///
+/// What crosses is an access token and never a refresh token
+/// (`crate::proxy::wire::strip_refresh_token`), so holding this body lets a
+/// machine spend an account but never advance its single-use refresh chain.
+///
+/// Conditional, and optionally BLOCKING. `?wait=<secs>` with a matching
+/// `If-None-Match` holds the request open until the accounts actually move,
+/// which is what lets a replica learn about a switch in milliseconds rather than
+/// on its next poll. Without `wait` it answers immediately, as it always did,
+/// and a quiet origin returns a bodyless 304 rather than the accounts again.
+///
+/// A wait occupies one of the 32 connection slots for its duration, so it is
+/// capped ([`MAX_WAIT_SECS`]) well inside the connection's own 120s lifetime.
+fn mirror(req: &Request) -> Response {
+    let waited = req
+        .param("wait")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs.min(MAX_WAIT_SECS)));
+    match (waited, req.if_none_match.as_deref()) {
+        // Only a client that says what it already holds can be made to wait:
+        // with no tag every answer is a change, so there is nothing to wait for.
+        (Some(wait), Some(tag)) => wait_for_change(tag, wait),
+        _ => mirror_now(req),
+    }
+}
+
 /// Longest a `?wait` may hold a connection. Comfortably inside `Limits`'
 /// 120-second connection lifetime, so a waiting request always gets to answer on
 /// the connection it arrived on.
 const MAX_WAIT_SECS: u64 = 60;
 
-/// How often a wait re-checks. Short enough that a switch reads as instant.
+/// How often a wait re-checks. The gate is a stat walk rather than a body build,
+/// so this is short enough that a switch reads as instant.
 const WAIT_POLL: Duration = Duration::from_millis(250);
+
+/// Block until the mirror's content digest leaves `tag`, or `wait` elapses.
+///
+/// Two stages on purpose. The cheap one is a lock-free stat walk
+/// ([`mirror_fingerprint`](crate::proxy::wire::mirror_fingerprint)) answering
+/// "could anything have moved?" without touching the state lock; only when that
+/// shifts is a body actually built and its digest compared. The poller
+/// rewriting an identical cache moves an mtime without moving the content, and
+/// that costs one discarded body build rather than waking the replica.
+fn wait_for_change(tag: &str, wait: Duration) -> Response {
+    let deadline = std::time::Instant::now() + wait;
+    let mut seen = crate::proxy::wire::mirror_fingerprint();
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Response::not_modified(tag.to_string());
+        }
+        std::thread::sleep(WAIT_POLL.min(deadline - now));
+
+        let current = crate::proxy::wire::mirror_fingerprint();
+        if current == seen {
+            continue;
+        }
+        seen = current;
+        let body = match crate::proxy::wire::MirrorBody::from_disk() {
+            Ok(body) => body,
+            // A transient failure mid-wait (a held state lock, a tree caught
+            // between writes) is not this request's problem: keep waiting rather
+            // than handing the replica an error it has to interpret.
+            Err(_) => continue,
+        };
+        if body.etag() == tag {
+            continue;
+        }
+        return serialize(body);
+    }
+}
+
+/// The immediate answer: build, compare, respond.
+fn mirror_now(req: &Request) -> Response {
+    let body = match crate::proxy::wire::MirrorBody::from_disk() {
+        Ok(body) => body,
+        Err(e) => {
+            let reason = sanitize_for_log(&e.to_string());
+            logline!("clauth api: failed to build a mirror body: {reason}");
+            // A held state flock is retryable and the replica polls anyway, so
+            // it gets the same 503 a refused switch gets rather than a 500 that
+            // reads like a defect.
+            return if e.downcast_ref::<StateLockTimeout>().is_some() {
+                Response::refused(503, "state_locked", &reason)
+            } else {
+                Response::error(500, "internal")
+            };
+        }
+    };
+    let etag = body.etag();
+    if req.if_none_match.as_deref() == Some(etag.as_str()) {
+        return Response::not_modified(etag);
+    }
+    serialize(body)
+}
+
+fn serialize(body: crate::proxy::wire::MirrorBody) -> Response {
+    let etag = body.etag();
+    match serde_json::to_vec(&body) {
+        Ok(bytes) => Response::raw_json_tagged(200, bytes, etag),
+        Err(e) => {
+            logline!("clauth api: failed to serialize a mirror body: {e}");
+            Response::error(500, "internal")
+        }
+    }
+}
 
 /// The one field `POST /api/v1/switch` accepts.
 #[derive(serde::Deserialize)]

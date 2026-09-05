@@ -250,6 +250,13 @@ pub(crate) enum Command {
         status: bool,
         /// Also serve the REST API over TLS; bare --listen means 0.0.0.0:8443
         ///
+        /// Serves the status feed, the account switch, and `/v1/mirror`, which
+        /// is what a `clauth proxy` on another machine clones this host's
+        /// accounts from. Every one of them needs the bearer token below, so
+        /// anything holding that token can read accounts from this daemon. The
+        /// mirrored credential carries no refresh token, so a replica can spend
+        /// an account but never rotate its chain.
+        ///
         /// For running the daemon on one machine and a client (clauth-tray) on
         /// another. TLS comes from this host's lego certificate — from
         /// /etc/lego/certificates on macOS and Linux, and from
@@ -305,6 +312,23 @@ pub(crate) enum Command {
         #[arg(long)]
         rotate_token: bool,
     },
+
+    /// Mirror another host's accounts onto this machine, and keep them current
+    ///
+    /// Clones the profiles, credentials, roster and usage from a
+    /// `clauth daemon --listen` running elsewhere, writes them into
+    /// this machine's ~/.clauth, and then follows that origin on an interval,
+    /// keeping ~/.claude/.credentials.json pointed at whatever it has active.
+    ///
+    /// This host becomes a read-only follower. Switching, login and delete
+    /// belong to the origin and are refused here, and this machine never
+    /// refreshes a token or polls usage: the mirrored credential carries no
+    /// refresh token to rotate, and the background refresher stays down. That
+    /// is what keeps two machines off one single-use refresh chain.
+    ///
+    /// Reads all work: the TUI, `list`, `which`, `status` and `sessions` serve
+    /// the mirrored numbers, and `clauth start` runs sessions normally.
+    Proxy(ProxyArgs),
 
     /// Print the usage / auto-switch snapshot as JSON
     ///
@@ -485,6 +509,64 @@ impl LoginArgs {
     pub(crate) fn is_api_mode(&self) -> bool {
         self.base_url.is_some() || self.api_key.is_some()
     }
+}
+
+/// `clauth proxy`'s origin, its credential, and the shape of the follow loop.
+///
+/// Every field is optional because `~/.clauth/proxy.json` carries the answers
+/// after the first run: `clauth proxy --from host` once, bare `clauth proxy`
+/// forever after. A flag passed again overrides the stored value and is written
+/// back, so changing the origin or the cadence is one command, not an edit.
+#[derive(Args, Debug)]
+pub(crate) struct ProxyArgs {
+    /// Origin host, as the FQDN its certificate names. Port defaults to 8443.
+    ///
+    /// It has to be the name, not an address: the daemon serves this host's own
+    /// lego certificate, so a bare IP fails verification whatever is listening.
+    #[arg(long, value_name = "HOST[:PORT]")]
+    pub(crate) from: Option<String>,
+    /// Read the origin's bearer token from a file instead of prompting.
+    ///
+    /// There is deliberately no --token: an argument is visible in `ps` and in
+    /// shell history, and this one is a password. Without this flag the token
+    /// is read echo-off from the terminal, or from stdin when piped.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) token_file: Option<PathBuf>,
+    /// Pull once and exit, instead of following the origin.
+    #[arg(long, conflicts_with = "interval")]
+    pub(crate) once: bool,
+    /// Fallback poll interval in seconds. Default 60, capped at 300.
+    ///
+    /// Not the latency. The origin holds each request open until the accounts
+    /// actually move, so a switch there lands here in about a round trip. This
+    /// governs only the two cases with nothing to wait on: retrying after a
+    /// failed pull, and an origin too old to hold a request.
+    ///
+    /// The cap is not arbitrary. On that fallback path the origin rotates an
+    /// access token about 15 minutes before it expires and Claude Code refreshes
+    /// its own within 5 minutes of expiry, so a pull has a ten-minute window to
+    /// carry the new token across. Miss it and sessions here start failing at
+    /// expiry, with no refresh token on this side to recover with.
+    #[arg(long, value_name = "SECS")]
+    pub(crate) interval: Option<u64>,
+    /// Stop being a replica: forget the origin and re-arm this host.
+    ///
+    /// Removes ~/.clauth/proxy.json, after which the refresher, switching and
+    /// login all work here again. The mirrored profiles stay on disk, and their
+    /// credentials still carry no refresh token, so re-authenticate anything
+    /// you mean to keep using with `clauth login`.
+    #[arg(long, conflicts_with_all = ["from", "token_file", "once", "interval"])]
+    pub(crate) forget: bool,
+}
+
+impl ProxyArgs {
+    /// Seconds between pulls when the flag is absent, and the ceiling the flag
+    /// is checked against. See [`ProxyArgs::interval`] for why there is a cap.
+    pub(crate) const DEFAULT_INTERVAL_SECS: u64 = 60;
+    pub(crate) const MAX_INTERVAL_SECS: u64 = 300;
+    /// The port `--from` fills in when the operator gives a bare hostname,
+    /// matching [`DEFAULT_LISTEN`]'s.
+    pub(crate) const DEFAULT_PORT: u16 = 8443;
 }
 
 /// `clauth herdr <cmd>`: install and uninstall the plugin and its config wiring.

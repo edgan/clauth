@@ -1737,6 +1737,74 @@ mod api_key_helper_tests {
     }
 }
 
+// ── proxy ───────────────────────────────────────────────────────────────────
+
+/// A bare `clauth proxy` has to parse: after the first run the origin, token and
+/// cadence all come from `proxy.json`.
+#[test]
+fn proxy_parses_bare_and_with_an_origin() {
+    let Command::Proxy(bare) = command(&["proxy"]) else {
+        panic!("must parse");
+    };
+    assert_eq!(bare.from, None);
+    assert!(!bare.once && !bare.forget);
+
+    let Command::Proxy(a) = command(&["proxy", "--from", "boson.example.org", "--once"]) else {
+        panic!("must parse");
+    };
+    assert_eq!(a.from.as_deref(), Some("boson.example.org"));
+    assert!(a.once);
+}
+
+/// `--forget` is the opposite of configuring an origin, so pairing it with one
+/// is a typo worth catching at parse time.
+#[test]
+fn proxy_forget_conflicts_with_configuring_an_origin() {
+    for args in [
+        ["proxy", "--forget", "--from", "boson.example.org"].as_slice(),
+        ["proxy", "--forget", "--interval", "60"].as_slice(),
+        ["proxy", "--forget", "--once"].as_slice(),
+    ] {
+        assert_ne!(parse_exit_code(args), 0, "{args:?} should not parse");
+    }
+}
+
+/// There is deliberately no `--token`: an argument lands in `ps` and in shell
+/// history, and this one is a password. `--token-file` is the non-interactive
+/// path.
+#[test]
+fn proxy_has_no_token_argument() {
+    assert_ne!(
+        parse_exit_code(&["proxy", "--token", "deadbeef"]),
+        0,
+        "a token must never be passable on the command line"
+    );
+    let Command::Proxy(a) = command(&["proxy", "--token-file", "/tmp/t"]) else {
+        panic!("must parse");
+    };
+    assert_eq!(
+        a.token_file.as_deref(),
+        Some(std::path::Path::new("/tmp/t"))
+    );
+}
+
+/// `--once` pulls and exits, so an interval would describe a loop that never
+/// runs.
+#[test]
+fn proxy_once_conflicts_with_an_interval() {
+    assert_ne!(parse_exit_code(&["proxy", "--once", "--interval", "60"]), 0);
+}
+
+/// Every real subcommand shadows a same-named profile, and `proxy` is now one
+/// of them.
+#[test]
+fn proxy_shadows_a_profile_of_the_same_name() {
+    assert!(
+        matches!(command(&["proxy"]), Command::Proxy(_)),
+        "the subcommand wins over the external-subcommand arm"
+    );
+}
+
 /// `clauth herdr install` and its flags. The grammar is what makes the setup a
 /// single command, so a rename or a dropped flag reds here rather than in a
 /// user's shell.

@@ -14,7 +14,7 @@ const BASH_TEMPLATE: &str = r#"_clauth() {
     if [ "$COMP_CWORD" -eq 1 ]; then
         local profiles
         profiles=$(clauth __complete 2>/dev/null)
-        COMPREPLY=( $(compgen -W "${profiles} start login delete disable enable rolling-token static-token which list jobs sessions resume info daemon status mcp herdr completions --theme" -- "${cur}") )
+        COMPREPLY=( $(compgen -W "${profiles} start login delete disable enable rolling-token static-token which list jobs sessions resume info daemon proxy status mcp herdr completions --theme" -- "${cur}") )
     elif [ "$prev" = "--theme" ]; then
         COMPREPLY=( $(compgen -W "full compatible" -- "${cur}") )
     elif [ "${COMP_WORDS[1]}" = "login" ] && [ "${cur:0:2}" = "--" ]; then
@@ -23,6 +23,8 @@ const BASH_TEMPLATE: &str = r#"_clauth() {
         COMPREPLY=( $(compgen -W "--isolated --with-fallback" -- "${cur}") )
     elif [ "${COMP_WORDS[1]}" = "daemon" ] && [ "${cur:0:2}" = "--" ]; then
         COMPREPLY=( $(compgen -W "--standby --no-standby --replace --status --listen --cert --key --print-token --rotate-token" -- "${cur}") )
+    elif [ "${COMP_WORDS[1]}" = "proxy" ] && [ "${cur:0:2}" = "--" ]; then
+        COMPREPLY=( $(compgen -W "--from --token-file --once --interval --forget" -- "${cur}") )
     elif [ "$prev" = "--isolated" ] || [ "$prev" = "--with-fallback" ] || [ "$prev" = "--profile" ]; then
         local profiles
         profiles=$(clauth __complete 2>/dev/null)
@@ -86,6 +88,7 @@ _clauth() {
             'resume[resume a session under a chosen profile]' \
             'info[print resume command + storage path for a session]' \
             'daemon[run the headless scheduler with no TUI]' \
+            'proxy[mirror another host'"'"'s accounts onto this machine]' \
             'status[print the usage / auto-switch snapshot as JSON]' \
             'mcp[run the stdio MCP server]' \
             'herdr[install the herdr plugin and bind a key to it]' \
@@ -147,6 +150,13 @@ _clauth() {
             '--key[private key for --cert]' \
             '--print-token[print the REST API auth token and exit]' \
             '--rotate-token[replace the REST API auth token and exit]'
+    elif (( CURRENT >= 3 )) && [[ "${words[2]}" == proxy ]]; then
+        _values 'flag' \
+            '--from[origin host, as the FQDN its certificate names]' \
+            '--token-file[read the origin token from a file instead of prompting]' \
+            '--once[pull once and exit instead of following]' \
+            '--interval[seconds between pulls, default 60, capped at 300]' \
+            '--forget[stop mirroring and re-arm this host]'
     elif (( CURRENT >= 3 )) && [[ "${words[2]}" == status ]]; then
         _values 'flag' '--json[print the status snapshot as JSON]' '--all[also list disabled profiles]' '--disabled[also list disabled profiles]'
     elif (( CURRENT >= 3 )) && [[ "${words[2]}" == list ]]; then
@@ -176,6 +186,7 @@ complete -c clauth -f -n __fish_is_first_token -a resume -d "Resume a session un
 complete -c clauth -f -n __fish_is_first_token -a info -d "Print resume command + storage path"
 complete -c clauth -f -n __fish_is_first_token -a completions -d "Emit shell completion script"
 complete -c clauth -f -n __fish_is_first_token -a daemon -d "Run the headless scheduler with no TUI"
+complete -c clauth -f -n __fish_is_first_token -a proxy -d "Mirror another host's accounts onto this machine"
 complete -c clauth -f -n __fish_is_first_token -a status -d "Print the usage / auto-switch snapshot as JSON"
 complete -c clauth -f -n __fish_is_first_token -a mcp -d "Run the stdio MCP server"
 complete -c clauth -f -n __fish_is_first_token -a herdr -d "Install the herdr plugin, read its knobs, or uninstall it"
@@ -222,6 +233,11 @@ complete -c clauth -f -n "__fish_seen_subcommand_from daemon" -a --cert -d "Serv
 complete -c clauth -f -n "__fish_seen_subcommand_from daemon" -a --key -d "Private key for --cert"
 complete -c clauth -f -n "__fish_seen_subcommand_from daemon" -a --print-token -d "Print the REST API auth token and exit"
 complete -c clauth -f -n "__fish_seen_subcommand_from daemon" -a --rotate-token -d "Replace the REST API auth token and exit"
+complete -c clauth -f -n "__fish_seen_subcommand_from proxy" -a --from -d "Origin host, as the FQDN its certificate names"
+complete -c clauth -f -n "__fish_seen_subcommand_from proxy" -a --token-file -d "Read the origin token from a file instead of prompting"
+complete -c clauth -f -n "__fish_seen_subcommand_from proxy" -a --once -d "Pull once and exit instead of following"
+complete -c clauth -f -n "__fish_seen_subcommand_from proxy" -a --interval -d "Seconds between pulls, default 60, capped at 300"
+complete -c clauth -f -n "__fish_seen_subcommand_from proxy" -a --forget -d "Stop mirroring and re-arm this host"
 "#;
 
 /// The placeholder each script carries where its `login` flag list goes; the
