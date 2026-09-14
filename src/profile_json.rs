@@ -197,17 +197,34 @@ fn windows_of(name: &ProfileName, third_party: bool, provider: Option<Provider>)
             provider,
         };
     }
-    // The status-line overlay rides the READ, not any one caller. Upstream's
-    // rewrite made this the single place an OAuth usage cache is loaded for
-    // publication, so applying it here is what keeps `clauth list`, the daemon's
-    // status feed, the HTTP API and the MCP payloads all showing the same
-    // floored figure the TUI does — the property the old `windows_json` call
-    // site held before that function was replaced.
-    let usage = load_profile_cache::<UsageInfo>(name, file).map(|mut u| {
-        crate::statusline::overlay(name, &mut u);
-        Box::new(u)
-    });
-    ProfileWindows::Oauth { usage, age_secs }
+    ProfileWindows::Oauth {
+        usage: load_oauth_usage(name).map(Box::new),
+        age_secs,
+    }
+}
+
+/// One OAuth usage cache read, with the status-line overlay applied.
+///
+/// The overlay rides the READ, not any one caller: both loads of this cache go
+/// through here, so no surface can publish a figure another one contradicts.
+/// [`windows_of`] answers the MCP tools and every figure `hook_note` reasons
+/// from; [`published_windows`] answers `status.json`, the HTTP feed a remote
+/// tray polls, and `clauth list` (which renders `build_status`'s entries rather
+/// than reading a cache of its own). The TUI overlays its own in-memory copy on
+/// its tick instead, having already loaded one.
+///
+/// Both loads, because for one release only the first had it.
+/// `published_windows` read the cache raw, so a session's hook note in Claude
+/// Code showed the floored figure while the tray polling the feed showed the
+/// API's rounded one — the exact disagreement the overlay exists to remove,
+/// split across the two surfaces most likely to be read side by side. Nothing
+/// caught it: the comment here claimed this was the only load on the publish
+/// path without checking WHICH surfaces each load answers, and no test covered
+/// the feed's figures.
+fn load_oauth_usage(name: &ProfileName) -> Option<UsageInfo> {
+    let mut usage = load_profile_cache::<UsageInfo>(name, USAGE_CACHE_FILE)?;
+    crate::statusline::overlay(name, &mut usage);
+    Some(usage)
 }
 
 /// Seconds since `file` was last written for `name`; `None` when it is absent,
@@ -246,10 +263,11 @@ pub(crate) fn oauth_windows(usage: &UsageInfo) -> Vec<Window> {
         .collect()
 }
 
-/// The profile's OAuth usage windows, read fresh from the disk cache; empty
-/// when there is no cache. The rows of the published `status.json` `windows`
-/// array — hence this flat spelling rather than [`ProfileWindows`]'s
-/// discriminated one, which the MCP surface renders.
+/// The profile's OAuth usage windows, read fresh from the disk cache through
+/// [`load_oauth_usage`], so the status-line overlay applies here exactly as it
+/// does on the other load; empty when there is no cache. The rows of the
+/// published `status.json` `windows` array — hence this flat spelling rather
+/// than [`ProfileWindows`]'s discriminated one, which the MCP surface renders.
 ///
 /// Empty TOO for an account whose figures live in the third-party cache, the
 /// shared cache selector's name-only form
@@ -261,7 +279,7 @@ pub(crate) fn published_windows(name: &ProfileName) -> Vec<Window> {
     if crate::profile::stored_usage_cache_is_third_party(name) {
         return Vec::new();
     }
-    load_profile_cache::<UsageInfo>(name, USAGE_CACHE_FILE)
+    load_oauth_usage(name)
         .as_ref()
         .map(oauth_windows)
         .unwrap_or_default()
