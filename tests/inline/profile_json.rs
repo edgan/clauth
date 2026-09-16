@@ -388,9 +388,9 @@ fn seed_statusline_reading(name: &str, pct: f64, resets_at: i64) {
     write_profile_cache(
         &crate::profile::ProfileName::from(name),
         crate::profile_cache::STATUSLINE_CACHE_FILE,
-        &crate::statusline::LiveUsage {
+        &crate::statusline_core::LiveUsage {
             observed_at_ms: crate::usage::now_ms(),
-            five_hour: Some(crate::statusline::LiveWindow {
+            five_hour: Some(crate::statusline_core::LiveWindow {
                 used_percentage: pct,
                 resets_at,
             }),

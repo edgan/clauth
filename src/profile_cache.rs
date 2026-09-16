@@ -41,7 +41,7 @@ pub(crate) const ADOPT_REFUSAL_FILE: &str = "adopt_refusal.json";
 pub(crate) const PROFILE_FETCHED_CACHE_FILE: &str = "profile_fetched.json";
 
 /// The most recent rate-limit windows Claude Code handed this profile's status
-/// line (`statusline::LiveUsage`). Written by the `clauth statusline` hook, read
+/// line (`statusline_core::LiveUsage`). Written by the `clauth statusline` hook, read
 /// on the display path to overlay the polled `/usage` figures with the ones
 /// Claude Code itself floors. Absent for every profile with no live session.
 pub(crate) const STATUSLINE_CACHE_FILE: &str = "statusline_usage.json";

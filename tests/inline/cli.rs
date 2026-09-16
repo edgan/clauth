@@ -526,6 +526,52 @@ fn enable_takes_exactly_one_name() {
 
 // ── which / sessions / resume / info ────────────────────────────────────────
 
+/// The hook itself takes no flags — it is a shell snippet with a pipe in it —
+/// and the three setup flags are the whole rest of the grammar.
+#[test]
+fn statusline_is_a_bare_hook_with_three_setup_flags() {
+    let Command::Statusline(a) = command(&["statusline"]) else {
+        panic!("a bare statusline must parse");
+    };
+    assert!(a.to.is_none() && a.token_file.is_none() && !a.forget);
+
+    let Command::Statusline(a) = command(&["statusline", "--to", "boson.example.org:8443"]) else {
+        panic!("--to must parse");
+    };
+    assert_eq!(a.to.as_deref(), Some("boson.example.org:8443"));
+
+    let Command::Statusline(a) = command(&["statusline", "--forget"]) else {
+        panic!("--forget must parse");
+    };
+    assert!(a.forget);
+}
+
+/// There is deliberately no `--token`: an argument is visible in `ps` and in
+/// shell history, and this one is a password.
+#[test]
+fn statusline_refuses_a_token_on_the_command_line() {
+    assert!(parse(&["statusline", "--token", "abc"]).is_err());
+}
+
+/// `--token-file` names where to read the token for a daemon being configured,
+/// so it means nothing without `--to`; `--forget` is the opposite of both.
+#[test]
+fn the_statusline_setup_flags_refuse_the_combinations_that_mean_nothing() {
+    assert!(parse(&["statusline", "--token-file", "/tmp/t"]).is_err());
+    assert!(parse(&["statusline", "--to", "boson.example.org", "--forget"]).is_err());
+    assert!(parse(&["statusline", "--token-file", "/tmp/t", "--forget"]).is_err());
+    assert!(
+        parse(&[
+            "statusline",
+            "--to",
+            "boson.example.org",
+            "--token-file",
+            "/tmp/t"
+        ])
+        .is_ok()
+    );
+}
+
 #[test]
 fn which_and_sessions_take_only_json() {
     assert!(matches!(

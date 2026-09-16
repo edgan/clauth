@@ -9,6 +9,7 @@
 
 use super::*;
 
+use crate::statusline_core::{LiveUsage, LiveWindow};
 use crate::usage::{PlanInfo, PlanTier, UsageInfo, UsageWindow};
 
 /// The 5h reset used throughout, in the two spellings the feature has to
@@ -275,90 +276,4 @@ fn a_window_past_its_cap_survives_the_overlay() {
     let mut got = info(Some(window(100.0, Some(RESET_ISO))), None);
     apply(&live(Some(reading_at(101.0, RESET_EPOCH)), 2_000), &mut got);
     assert_eq!(got.five_hour.unwrap().utilization, 101.0);
-}
-
-// --- the high-water mark, against out-of-order reporters ---
-
-/// The reported bug: two Claude Code sessions on one profile, each reporting
-/// the header from its own last API response, walked the tray display back and
-/// forth (`92 · 91 · 94`). A small step back is the reporter, never the
-/// account — spend does not un-spend inside a window.
-#[test]
-fn a_small_step_back_inside_one_window_is_ignored() {
-    let held = live(Some(reading_at(94.0, RESET_EPOCH)), 1_000);
-    let mut got = live(Some(reading_at(92.0, RESET_EPOCH)), 2_000);
-    steady(&mut got, &held);
-    assert_eq!(got.five_hour, Some(reading_at(94.0, RESET_EPOCH)));
-}
-
-/// Holding the figure must not hold the stamp with it: the reading is current,
-/// only the dip was refused, and a stale stamp would hand the window straight
-/// back to the poll's rounded number.
-#[test]
-fn a_held_figure_still_carries_the_fresh_stamp() {
-    let held = live(Some(reading_at(94.0, RESET_EPOCH)), 1_000);
-    let mut got = live(Some(reading_at(92.0, RESET_EPOCH)), 2_000);
-    steady(&mut got, &held);
-    assert_eq!(got.observed_at_ms, 2_000);
-}
-
-/// The bound, from both sides. Exactly `IGNORED_DROP_PCT` is still a dip; past
-/// it the correction is large enough to believe.
-#[test]
-fn the_drop_bound_is_inclusive_and_ends() {
-    let held = Some(reading_at(94.0, RESET_EPOCH));
-    assert_eq!(steadied(Some(reading_at(69.0, RESET_EPOCH)), held), held);
-    assert_eq!(
-        steadied(Some(reading_at(68.9, RESET_EPOCH)), held),
-        Some(reading_at(68.9, RESET_EPOCH))
-    );
-}
-
-/// Forward is always believed — the mark is a floor, not a freeze.
-#[test]
-fn a_step_forward_is_always_taken() {
-    let held = Some(reading_at(94.0, RESET_EPOCH));
-    assert_eq!(
-        steadied(Some(reading_at(94.5, RESET_EPOCH)), held),
-        Some(reading_at(94.5, RESET_EPOCH))
-    );
-}
-
-/// A reset is the one honest drop, and it arrives as a new `resets_at` — so it
-/// must land whole rather than being mistaken for a dip and pinned at 94 for
-/// the next five hours.
-#[test]
-fn a_reset_clears_the_mark_instead_of_reading_as_a_dip() {
-    let held = Some(reading_at(94.0, RESET_EPOCH));
-    let after = Some(reading_at(0.0, RESET_EPOCH + 5 * 3600));
-    assert_eq!(steadied(after, held), after);
-}
-
-/// A window with no mark yet has nothing to defend.
-#[test]
-fn a_window_with_no_stored_mark_takes_the_reading() {
-    let fresh = Some(reading_at(3.0, RESET_EPOCH));
-    assert_eq!(steadied(fresh, None), fresh);
-    assert_eq!(steadied(None, Some(reading_at(94.0, RESET_EPOCH))), None);
-}
-
-/// 5h and 7d hold their own marks: a dip on one must not drag the other.
-#[test]
-fn each_window_holds_its_own_mark() {
-    let seven_d = 1_788_703_200;
-    let held = LiveUsage {
-        observed_at_ms: 1_000,
-        five_hour: Some(reading_at(94.0, RESET_EPOCH)),
-        seven_day: Some(reading_at(12.0, seven_d)),
-        session_id: None,
-    };
-    let mut got = LiveUsage {
-        observed_at_ms: 2_000,
-        five_hour: Some(reading_at(92.0, RESET_EPOCH)),
-        seven_day: Some(reading_at(13.0, seven_d)),
-        session_id: None,
-    };
-    steady(&mut got, &held);
-    assert_eq!(got.five_hour, Some(reading_at(94.0, RESET_EPOCH)));
-    assert_eq!(got.seven_day, Some(reading_at(13.0, seven_d)));
 }

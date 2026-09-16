@@ -23,6 +23,8 @@ const BASH_TEMPLATE: &str = r#"_clauth() {
         COMPREPLY=( $(compgen -W "--isolated --with-fallback" -- "${cur}") )
     elif [ "${COMP_WORDS[1]}" = "daemon" ] && [ "${cur:0:2}" = "--" ]; then
         COMPREPLY=( $(compgen -W "--standby --no-standby --replace --status" -- "${cur}") )
+    elif [ "${COMP_WORDS[1]}" = "statusline" ] && [ "${cur:0:2}" = "--" ]; then
+        COMPREPLY=( $(compgen -W "--to --token-file --forget" -- "${cur}") )
     elif [ "$prev" = "--isolated" ] || [ "$prev" = "--with-fallback" ] || [ "$prev" = "--profile" ]; then
         local profiles
         profiles=$(clauth __complete 2>/dev/null)
@@ -143,6 +145,11 @@ _clauth() {
             '--no-standby[explicit spelling of the default]' \
             '--replace[terminate the running daemon and take over]' \
             '--status[print the running daemon, or exit 1 when none is]'
+    elif (( CURRENT >= 3 )) && [[ "${words[2]}" == statusline ]]; then
+        _values 'flag' \
+            '--to[daemon to post readings to, as the FQDN its certificate names]' \
+            '--token-file[read the daemon token from a file instead of prompting]' \
+            '--forget[stop forwarding; record readings here only]'
     elif (( CURRENT >= 3 )) && [[ "${words[2]}" == status ]]; then
         _values 'flag' '--json[print the status snapshot as JSON]' '--all[also list disabled profiles]' '--disabled[also list disabled profiles]'
     elif (( CURRENT >= 3 )) && [[ "${words[2]}" == list ]]; then
@@ -192,6 +199,9 @@ complete -c clauth -f -n "__fish_seen_subcommand_from start login delete disable
 complete -c clauth -f -n "__fish_seen_subcommand_from start" -a --isolated -d "Clean isolated runtime; drops operator config"
 complete -c clauth -f -n "__fish_seen_subcommand_from start" -a --with-fallback -d "Follow the fallback chain; needs a running daemon"
 complete -c clauth -f -n "__fish_seen_subcommand_from which" -a --json -d "Emit JSON"
+complete -c clauth -f -n "__fish_seen_subcommand_from statusline" -a --to -d "Daemon to post readings to, as the FQDN its certificate names"
+complete -c clauth -f -n "__fish_seen_subcommand_from statusline" -a --token-file -d "Read the daemon token from a file instead of prompting"
+complete -c clauth -f -n "__fish_seen_subcommand_from statusline" -a --forget -d "Stop forwarding; record readings here only"
 complete -c clauth -f -n "__fish_seen_subcommand_from sessions" -a --json -d "Emit the stable machine-readable array"
 complete -c clauth -f -n "__fish_seen_subcommand_from jobs" -a --json -d "Emit the stable machine-readable array"
 complete -c clauth -f -n "__fish_seen_subcommand_from sessions" -a --tokens -d "Add token totals + cost; reads every transcript in full"

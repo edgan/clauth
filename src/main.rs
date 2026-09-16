@@ -42,6 +42,8 @@ mod spinner;
 mod start;
 mod status;
 mod statusline;
+mod statusline_core;
+mod statusline_remote;
 mod throughput;
 mod token_ledger;
 mod tokens;
@@ -186,7 +188,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Enable { profile } => cmd_enable(&profile),
         Command::RollingToken { profile } => cmd_rolling_token(&profile),
         Command::Which { json } => which::run(json),
-        Command::Statusline => statusline::run(),
+        Command::Statusline(a) => statusline::run(&a),
         Command::List { all, disabled } => list::run(all || disabled),
         Command::Jobs { json } => jobs_cli::run(json),
         Command::Sessions { json, tokens } => sessions_cli::run_sessions(json, tokens),

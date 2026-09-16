@@ -38,6 +38,20 @@
 //! printf '%s' "$input" | clauth statusline &   # fire-and-forget
 //! ```
 //!
+//! # Sessions on another machine
+//!
+//! Everything above assumes the account being spent is stored on the machine
+//! running Claude Code. When the accounts live on a `clauth daemon --listen`
+//! elsewhere, this host has nothing to record against and the daemon — the one
+//! surface an operator is watching — keeps showing the rounded figure for
+//! exactly the account that is moving.
+//!
+//! `clauth statusline --to <fqdn>` points the hook at that daemon: the reading
+//! is posted to its REST API, which attributes and records it there. See
+//! [`crate::statusline_remote`] for the client and [`crate::statusline_core`]
+//! for what crosses. The local recording below still runs either way, so a host
+//! that has its own accounts and its own TUI does not lose them by forwarding.
+//!
 //! # Trust boundary
 //!
 //! The reading is an OVERLAY, never a source. It can only lower or raise a
@@ -53,76 +67,17 @@
 //!
 //! Several sessions can report against one profile at once, each carrying the
 //! header from its own last API response, so the readings arrive out of order.
-//! [`IGNORED_DROP_PCT`] settles that on the way in by holding each window at its
-//! high-water mark.
+//! `statusline_core::steadied` settles that on the way in by holding each window
+//! at its high-water mark.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
+use crate::cli::StatuslineArgs;
 use crate::profile::ProfileName;
-use crate::profile_cache::{STATUSLINE_CACHE_FILE, load_profile_cache, write_profile_cache};
+use crate::profile_cache::{STATUSLINE_CACHE_FILE, load_profile_cache};
+use crate::statusline_core::{LiveUsage, LiveWindow, same_reset};
 use crate::usage::{UsageInfo, UsageWindow, iso_to_epoch_secs, now_ms};
-
-/// How far apart a status-line `resets_at` and a cached `resets_at` may sit and
-/// still name the same window, in seconds.
-///
-/// They describe one instant in two roundings: the header is `Math.round`ed to
-/// a whole second by Claude Code, while `/usage` reports the sub-second truth
-/// just under it (`11:19:59.541249` against the header's `11:20:00`). A couple
-/// of seconds of slack absorbs that without ever spanning two real windows,
-/// which are hours apart.
-const RESET_MATCH_TOLERANCE_SECS: i64 = 5;
-
-/// How far a fresh reading may step BACKWARD inside one window before it is
-/// believed, in percentage points.
-///
-/// Spend only ever accumulates inside a window, so a genuine figure never
-/// falls: the only honest drop is a reset, which lands as a new `resets_at` and
-/// never reaches this rule. Every small dip therefore comes from the reporter,
-/// not the account — most often two Claude Code sessions on one profile, each
-/// reporting the header from ITS own last API response. An idle session keeps
-/// re-reporting a figure minutes old, and because both stamp the moment clauth
-/// ingested them rather than the moment Anthropic issued them, the stale one
-/// looks just as fresh and the display oscillates (`92 · 91 · 94`).
-///
-/// Holding the high-water mark settles that: a step back is dropped, a step
-/// forward is always taken, and a real reset clears the mark with it.
-///
-/// The bound is deliberately generous, because how far a stale reporter lags is
-/// set by how long it has been idle, not by anything small — a session quiet
-/// through a heavy stretch on another one comes back tens of points behind, and
-/// a tight bound would let exactly that walk the display backwards. What is
-/// left outside the bound is a fall too steep for lag to explain, which is the
-/// only case worth believing over the mark.
-const IGNORED_DROP_PCT: f64 = 25.0;
-
-/// One window as Claude Code reports it to a status line.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub(crate) struct LiveWindow {
-    /// `used_percentage`: the response header's fraction times 100, so already
-    /// on [`UsageWindow::utilization`]'s 0-100 scale. Can exceed 100 when usage
-    /// legitimately runs past a window's cap.
-    pub(crate) used_percentage: f64,
-    /// `resets_at` in unix epoch seconds — the window's identity, and the only
-    /// thing tying a reading to the window it was taken from.
-    pub(crate) resets_at: i64,
-}
-
-/// A profile's most recent status-line reading, as persisted per profile.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub(crate) struct LiveUsage {
-    /// Epoch-ms this reading was ingested. Compared against the usage cache's
-    /// own mtime so a poll that landed later always wins.
-    pub(crate) observed_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) five_hour: Option<LiveWindow>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) seven_day: Option<LiveWindow>,
-    /// The Claude Code session that reported it. Diagnostic only — attribution
-    /// runs through [`crate::which`], never through this.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) session_id: Option<String>,
-}
 
 /// The status-line payload, narrowed to the two things worth keeping. Every
 /// field is optional: `rate_limits` is absent for API-key, Bedrock and Vertex
@@ -178,62 +133,60 @@ impl RawLiveWindow {
 /// session can't be attributed to a stored profile — neither is an error worth
 /// failing a status line over. Malformed stdin IS an error: that is a wiring
 /// mistake, and it only surfaces when someone runs this by hand.
-pub(crate) fn run() -> Result<()> {
+///
+/// The setup flags never read stdin. `clauth statusline --to <host>` is typed at
+/// a prompt, not piped a payload, and a setup run that blocked on an empty stdin
+/// would look like a hang.
+pub(crate) fn run(args: &StatuslineArgs) -> Result<()> {
+    if args.forget {
+        return crate::statusline_remote::forget();
+    }
+    if args.to.is_some() {
+        return crate::statusline_remote::configure(args);
+    }
     let mut raw = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw)
         .context("reading the status line payload on stdin")?;
     ingest(&raw)
 }
 
-/// [`run`]'s pure-ish core: parse `raw`, resolve the owning profile, persist.
-/// Split out so the parse and the refusals are testable without a real stdin.
+/// [`run`]'s pure-ish core: parse `raw`, resolve the owning profile, persist,
+/// and forward to a configured daemon. Split out so the parse and the refusals
+/// are testable without a real stdin.
 fn ingest(raw: &str) -> Result<()> {
     let payload: StatusLinePayload = serde_json::from_str(raw)
         .context("the status line payload is not JSON Claude Code would emit")?;
-    let Some(mut live) = reading(&payload, now_ms()) else {
+    let Some(live) = reading(&payload, now_ms()) else {
         return Ok(());
     };
+    // The local write gets a COPY, because `record` rewrites what it is handed:
+    // a window held at this host's high-water mark comes back carrying the mark
+    // instead of the figure Claude Code just reported. Forwarding that would
+    // post one host's history to the daemon as though this session had read it,
+    // and would dedup against the mark, so every real movement under it went
+    // unsent. The daemon keeps its own mark; what it needs from here is the
+    // reading, unedited.
+    let mut local_copy = live.clone();
+    let local = record_locally(&mut local_copy);
+    // AFTER the local write, and independent of whether it found a profile or
+    // even succeeded: on a host whose accounts all live on the daemon, nothing
+    // local ever resolves, and that host is precisely the one with something to
+    // forward. Letting an unreadable local roster swallow the forward would make
+    // the remote case fail for a reason that has nothing to do with it.
+    crate::statusline_remote::forward(&live);
+    local
+}
+
+/// Record the reading against this host's own roster, if this host has one that
+/// owns the session. A miss is ordinary, not an error — see [`run`] — but a
+/// roster that cannot be READ is, and stays one.
+fn record_locally(live: &mut LiveUsage) -> Result<()> {
     let config = crate::profile::load_config()?;
     let Some((name, _)) = crate::which::resolve_active(&config) else {
         return Ok(());
     };
-    let name = ProfileName::from(name.as_str());
-    if let Some(stored) = load_profile_cache::<LiveUsage>(&name, STATUSLINE_CACHE_FILE) {
-        steady(&mut live, &stored);
-    }
-    write_profile_cache(&name, STATUSLINE_CACHE_FILE, &live);
+    crate::statusline_core::record(&ProfileName::from(name.as_str()), live);
     Ok(())
-}
-
-/// Hold each window at its high-water mark, per [`IGNORED_DROP_PCT`].
-///
-/// `live.observed_at_ms` is deliberately left at the ingest time even for a
-/// window whose figure was held: the reading IS current, it is only the dip
-/// that was refused, and letting the stamp go stale would hand the window back
-/// to the poll's rounded figure on the next frame.
-fn steady(live: &mut LiveUsage, stored: &LiveUsage) {
-    live.five_hour = steadied(live.five_hour, stored.five_hour);
-    live.seven_day = steadied(live.seven_day, stored.seven_day);
-}
-
-/// The figure to keep for one window: `incoming`, unless it steps back from
-/// `stored` by no more than [`IGNORED_DROP_PCT`] inside the same window.
-///
-/// A window `stored` doesn't cover, or covers under a reset that has since
-/// rolled, has no mark to defend and takes `incoming` whole — which is what
-/// lets a reset land immediately instead of being mistaken for a dip.
-fn steadied(incoming: Option<LiveWindow>, stored: Option<LiveWindow>) -> Option<LiveWindow> {
-    let (Some(new), Some(held)) = (incoming, stored) else {
-        return incoming;
-    };
-    if !same_reset(new.resets_at, held.resets_at) {
-        return incoming;
-    }
-    let dropped = held.used_percentage - new.used_percentage;
-    if dropped > 0.0 && dropped <= IGNORED_DROP_PCT {
-        return stored;
-    }
-    incoming
 }
 
 /// The persistable reading inside a payload, or `None` when it carries neither
@@ -268,11 +221,13 @@ pub(crate) fn overlay(name: &ProfileName, info: &mut UsageInfo) {
 /// [`overlay`]'s decision, testable without the filesystem.
 ///
 /// A window takes the live figure on ONE condition: the reading and the cached
-/// window name the same reset instant, within [`RESET_MATCH_TOLERANCE_SECS`]. A
+/// window name the same reset instant, within
+/// [`crate::statusline_core::RESET_MATCH_TOLERANCE_SECS`]. A
 /// reading from a window that has since rolled over describes spend that no
 /// longer exists, and a reading attributed to the wrong profile almost never
 /// lands on its reset instant, so this is also what keeps a bad attribution
-/// inert.
+/// inert — including one posted from another machine, where the reporting
+/// session is not one this host can see at all.
 ///
 /// Once a reading exists for the current window it is the source until that
 /// window resets — a newer poll does NOT take the window back. It used to: the
@@ -319,12 +274,6 @@ fn same_window(reading: &LiveWindow, cached: &UsageWindow) -> bool {
         .as_deref()
         .and_then(iso_to_epoch_secs)
         .is_some_and(|cached| same_reset(cached, reading.resets_at))
-}
-
-/// Whether two reset instants name one window, within
-/// [`RESET_MATCH_TOLERANCE_SECS`].
-fn same_reset(a: i64, b: i64) -> bool {
-    (a - b).abs() <= RESET_MATCH_TOLERANCE_SECS
 }
 
 #[cfg(test)]
