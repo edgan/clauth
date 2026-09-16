@@ -169,6 +169,12 @@ const FEATURE_MAP: &[(&str, &[&str])] = &[
             "a_content_length_that_is_not_bare_digits",
             "cert_source_is_explicit_only_when_both_files_are_named",
             "a_missing_certificate_fails_in_prepare_not_after_the_claim",
+            // `POST /api/v1/statusline`: a session on another machine reports
+            // the figure Claude Code shows, and the daemon decides whose it is.
+            "a_posted_reading_is_recorded_against_the_account",
+            "an_unknown_credential_is_404_and_writes_nothing",
+            "a_disabled_account_is_never_attributed",
+            "the_client_url_and_the_matched_route_are_one_spelling",
             // rolling session token (#59): the daemon leg — the tick that
             // re-stamps the sidecar and the gate it goes through.
             "claude_rolling_tick_",

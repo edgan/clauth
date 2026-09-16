@@ -144,6 +144,19 @@ pub(crate) mod rank {
         /// released before any other lock, and the anchor's disk IO stays
         /// outside the guard.
         AutoStartQueue = 240;
+        /// One `POST /api/v1/statusline` recorder at a time
+        /// (`daemon::api::statusline`). A reading is a read-modify-write of one
+        /// profile's status-line cache — the high-water rule IS the modify — so
+        /// two hosts posting against one account at the same instant would both
+        /// read the old mark and the later write would drop the higher one.
+        ///
+        /// A true leaf: nothing is acquired while it is held, and CONFIG is
+        /// released before it is taken (the route clones the roster out of that
+        /// mutex first, because reading every account's credential off disk has
+        /// no business running under it). The cache IO stays INSIDE the guard,
+        /// unlike `KickBlockState`'s, because serializing that IO is the entire
+        /// point of the lock rather than an incidental cost.
+        StatuslineRecord = 245;
         Tokens = 250;
         ThirdParty = 260;
         ThirdPartyUsageStore = 270;

@@ -23,6 +23,7 @@
 
 mod http;
 pub(crate) mod routes;
+pub(crate) mod statusline;
 pub(crate) mod tls;
 pub(crate) mod token;
 

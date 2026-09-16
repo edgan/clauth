@@ -40,6 +40,9 @@ pub(crate) struct ApiContext {
     pub(crate) token: AuthToken,
     /// One in-flight `POST /api/v1/switch` at a time. See [`rank::ApiSwitch`].
     pub(crate) switch_gate: RankedMutex<(), rank::ApiSwitch>,
+    /// One in-flight `POST /api/v1/statusline` recorder at a time. See
+    /// [`rank::StatuslineRecord`].
+    pub(crate) statusline_gate: RankedMutex<(), rank::StatuslineRecord>,
     /// The scheduler's in-memory signals, when a daemon built this context.
     ///
     /// Every route that BUILDS a body rather than serving the published file
@@ -63,6 +66,7 @@ impl ApiContext {
             status_path,
             token,
             switch_gate: RankedMutex::new(()),
+            statusline_gate: RankedMutex::new(()),
             live,
         })
     }
@@ -117,10 +121,12 @@ pub(crate) fn handle(ctx: &ApiContext, req: &Request) -> Response {
         // the body off whatever comes back, at every status.
         ("HEAD", "/status") => status(ctx, req),
         ("POST", "/switch") => switch(ctx, req),
+        ("POST", super::statusline::ROUTE_SUFFIX) => super::statusline::handle(ctx, req),
         // A known path reached with the wrong method is 405, so a client with a
         // typo'd verb gets told which half is wrong.
         (_, "/health" | "/status") => Response::error(405, "method_not_allowed"),
         (_, "/switch") => Response::error(405, "method_not_allowed"),
+        (_, super::statusline::ROUTE_SUFFIX) => Response::error(405, "method_not_allowed"),
         _ => Response::error(404, "not_found"),
     }
 }

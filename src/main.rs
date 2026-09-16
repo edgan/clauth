@@ -41,6 +41,7 @@ mod settings_sync;
 mod spinner;
 mod start;
 mod status;
+mod statusline_core;
 mod throughput;
 mod token_ledger;
 mod tokens;
