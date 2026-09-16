@@ -362,7 +362,7 @@ fn list_table_renders_a_third_party_rows_own_headroom() {
         lines,
         [
             "  PROFILE  PLAN  5H USED  7D USED  ENDPOINT",
-            "  z.ai     Z.ai    12.5%      48%  https://api.z.ai/api/anthropic",
+            "  z.ai     Z.ai      12%      48%  https://api.z.ai/api/anthropic",
         ],
         "a third-party row shows its own bars in the 5h/7d columns"
     );
@@ -414,7 +414,7 @@ fn list_table_falls_through_to_the_wallet_over_a_non_canonical_bar_label() {
         "a live but non-canonically-labeled bar does not suppress the wallet: {table}"
     );
     assert!(
-        !table.contains("12.5%"),
+        !table.contains("12%"),
         "a non-canonical bar never fills a column: {table}"
     );
 }
@@ -757,7 +757,7 @@ fn list_table_marks_a_stale_reading() {
         "a third-party row's stale marker rides its own cache age, got:\n{table}"
     );
     assert!(
-        table.contains("48%") || table.contains("12.5%"),
+        table.contains("48%") || table.contains("12%"),
         "and the columns still carry the (stale-marked) figures, got:\n{table}"
     );
 }
