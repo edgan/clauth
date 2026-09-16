@@ -139,7 +139,15 @@ fn load_windows(name: &ProfileName) -> (Option<UsageWindow>, Option<UsageWindow>
         return (None, None);
     }
     match load_profile_cache::<UsageInfo>(name, USAGE_CACHE_FILE) {
-        Some(u) => (live(&u.five_hour), live(&u.seven_day)),
+        Some(mut u) => {
+            // Same figure the TUI and the status feed show, for the same reason
+            // (`statusline::overlay`): a delegate comparing headroom across
+            // accounts should read what Claude Code reads.
+            crate::statusline::overlay(name, &mut u);
+            // Then mommy's lapsed-row filter (#74), which judges the figure the
+            // overlay settled on rather than the raw poll.
+            (live(&u.five_hour), live(&u.seven_day))
+        }
         None => (None, None),
     }
 }

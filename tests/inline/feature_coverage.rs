@@ -57,6 +57,15 @@ const FEATURE_MAP: &[(&str, &[&str])] = &[
         // the token dashboard + its cost lens, the status feed.
         "Monitor",
         &[
+            "overlay_replaces_the_rounded_figure",
+            "a_reading_from_another_window_is_refused",
+            // `clauth statusline --to`: a session on another machine reports
+            // its floored figure to the daemon that owns the account.
+            "an_address_is_refused_before_it_can_become_a_handshake_error",
+            "configure_stores_the_daemon_and_the_token_from_a_file",
+            "an_identical_reading_is_not_sent_twice",
+            "the_backoff_doubles_from_the_floor",
+            "recording_holds_the_mark_across_separate_calls",
             "parses_",
             "retry_after",
             "cached_fallback_does_not_clobber",

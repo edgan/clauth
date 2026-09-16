@@ -548,13 +548,25 @@ pub(crate) fn account_tier(profile: &Profile) -> Option<PlanTier> {
     })
 }
 
-/// Percent from API `f64`: drops trailing `.0` on whole numbers → `42%`, `42.3%`.
+/// A utilization reading as a whole percent, FLOORED — the same reading Claude
+/// Code prints for the window.
+///
+/// Its `/usage` panel and its rate-limit warnings both render
+/// `Math.floor(utilization)`, so a 5h window at 42.7% reads `42%` there. Rust's
+/// `{:.0}` rounds to nearest instead, which showed `43%` for the very same
+/// window and made clauth and `/usage` disagree by a point on the account the
+/// user was reading both for. Truncating also never claims quota that has not
+/// been spent: the figure only reaches `100%` once the window genuinely is.
+///
+/// `as i64` saturates and maps `NaN` to 0, so a garbage reading can't panic.
+pub(crate) fn pct_whole(pct: f64) -> i64 {
+    pct.floor() as i64
+}
+
+/// Percent from API `f64` for prose and table cells, floored per [`pct_whole`]
+/// → `42%`, never `42.3%`.
 pub(crate) fn format_pct(pct: f64) -> String {
-    if pct.fract() == 0.0 {
-        format!("{pct:.0}%")
-    } else {
-        format!("{pct}%")
-    }
+    format!("{}%", pct_whole(pct))
 }
 
 /// Absolute API amount: whole numbers render bare, fractions at two decimals →

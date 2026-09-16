@@ -529,6 +529,44 @@ fn is_past_reset_true_at_the_exact_boundary() {
     assert!(is_past_reset(&reset_window(0)));
 }
 
+/// Every width tier of the window column reports the SAME whole percent, and it
+/// is the floored one Claude Code's own `/usage` prints (`Math.floor`). A
+/// window at 42.7% reads `42%` in both tools; `{:.0}` would have said `43%`
+/// here and disagreed with `/usage` about the account in front of the user.
+///
+/// Walking all four tiers is the point: they format the figure at four separate
+/// call sites, so one of them reverting to nearest-rounding is exactly the
+/// regression a single-width test would miss.
+#[test]
+fn every_width_tier_floors_the_percent_like_claude_codes_usage() {
+    for (pct, want) in [(42.7, "42%"), (99.9, "99%"), (0.9, "0%"), (100.0, "100%")] {
+        let w = UsageWindow {
+            utilization: pct,
+            resets_at: None,
+        };
+        for width in [30, 20, 14, 6] {
+            // No reset stamp, so the percent is the last span at every tier.
+            let spans = window_summary_spans_bracketed(
+                Some(&w),
+                width,
+                true,
+                None,
+                ResetFmt::default(),
+                false,
+            );
+            let figure = spans
+                .last()
+                .expect("a window always renders")
+                .content
+                .trim();
+            assert_eq!(
+                figure, want,
+                "{pct} at width {width} must read {want}, got {figure:?}"
+            );
+        }
+    }
+}
+
 /// `stale` fades only the fill + `%` spans to `theme::faint()`; the brackets
 /// and the reset suffix keep their own styling either way. Fixture holds real
 /// (non-zero) fill so a color swap is observable — a mutation dropping the

@@ -712,3 +712,85 @@ fn published_windows_drops_rows_whose_reset_has_passed() {
     // first fixture's live 7d proved the row exists on this body, so the drop
     // here is the 7d filter's own verdict.
 }
+
+/// Seed a status-line reading for `name`, anchored to `resets_at` epoch
+/// seconds so [`crate::statusline::overlay`] recognises it as this window's.
+fn seed_statusline_reading(name: &str, pct: f64, resets_at: i64) {
+    write_profile_cache(
+        &crate::profile::ProfileName::from(name),
+        crate::profile_cache::STATUSLINE_CACHE_FILE,
+        &crate::statusline_core::LiveUsage {
+            observed_at_ms: crate::usage::now_ms(),
+            five_hour: Some(crate::statusline_core::LiveWindow {
+                used_percentage: pct,
+                resets_at,
+            }),
+            seven_day: None,
+            session_id: None,
+        },
+    );
+}
+
+/// The status-line overlay rides the READ, so it has to reach the PUBLISHED
+/// feed — `status.json`, the HTTP API a remote tray polls, and `clauth list` —
+/// and not only the surfaces that go through `profile_windows`.
+///
+/// It did not, for one release: `published_windows` loaded the usage cache raw,
+/// so a session's hook note served Claude Code's floored figure while the tray
+/// polling the feed served the API's rounded one, and the tray sat a point behind
+/// the session that was spending. This asserts the two loads agree, which is the
+/// property that broke — asserting only the published number would pass on a
+/// build where the overlay had instead been dropped from BOTH.
+#[test]
+fn published_windows_carry_the_status_line_reading() {
+    let _home = HomeSandbox::new();
+    let resets_at = (crate::usage::now_ms() / 1000) as i64 + 3_600;
+    let mut usage = five_hour_at(100.0);
+    usage
+        .five_hour
+        .as_mut()
+        .expect("five_hour_at built the window")
+        .resets_at = Some(crate::usage::epoch_secs_to_iso(resets_at));
+    seed_usage_cache("kerry", &usage, Duration::from_secs(100));
+    seed_statusline_reading("kerry", 107.0, resets_at);
+
+    let name = crate::profile::ProfileName::from("kerry");
+    let windows = published_windows(&name);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(
+        windows[0].utilization_pct, 107.0,
+        "the published feed serves the status-line reading, not the poll's 100"
+    );
+
+    let ProfileWindows::Oauth { usage, .. } = profile_windows_for(&name) else {
+        panic!("an OAuth account has OAuth windows")
+    };
+    assert_eq!(
+        usage.and_then(|u| u.five_hour).map(|w| w.utilization),
+        Some(windows[0].utilization_pct),
+        "one figure for every surface: the feed and the MCP tools cannot differ"
+    );
+}
+
+/// A reading anchored to a window that has already rolled over is inert on the
+/// published feed exactly as it is everywhere else — the guard travels with the
+/// overlay rather than being re-implemented per surface.
+#[test]
+fn published_windows_ignore_a_reading_from_another_window() {
+    let _home = HomeSandbox::new();
+    let resets_at = (crate::usage::now_ms() / 1000) as i64 + 3_600;
+    let mut usage = five_hour_at(4.0);
+    usage
+        .five_hour
+        .as_mut()
+        .expect("five_hour_at built the window")
+        .resets_at = Some(crate::usage::epoch_secs_to_iso(resets_at));
+    seed_usage_cache("kerry", &usage, Duration::from_secs(100));
+    seed_statusline_reading("kerry", 96.0, resets_at - 18_000);
+
+    let windows = published_windows(&crate::profile::ProfileName::from("kerry"));
+    assert_eq!(
+        windows[0].utilization_pct, 4.0,
+        "a reading from the previous window describes spend that no longer exists"
+    );
+}

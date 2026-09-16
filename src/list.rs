@@ -172,8 +172,8 @@ impl Row {
 }
 
 /// The `utilization_pct` of the window labeled `label`, formatted via
-/// [`format_pct`] (drops trailing `.0`); `-` when the profile has no cache
-/// or no such window.
+/// [`format_pct`] (floored to a whole percent); `-` when the profile has no
+/// cache or no such window.
 fn window_pct(windows: &[Window], label: &str) -> String {
     windows
         .iter()

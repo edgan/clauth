@@ -66,8 +66,8 @@ const HEADER: &str = "  PROFILE  PLAN    5H USED  7D USED  ENDPOINT";
 fn future_iso(ahead_secs: i64) -> String {
     crate::usage::epoch_secs_to_iso(crate::usage::now_epoch_secs() + ahead_secs)
 }
-// 42.4 → 42.4%, 17.6 → 17.6%: format_pct drops only trailing `.0`.
-const WORK_ROW: &str = "* work     Max 5x    42.4%    17.6%  -";
+// 42.4 → 42%, 17.6 → 17%: format_pct floors, matching Claude Code's `/usage`.
+const WORK_ROW: &str = "* work     Max 5x      42%      17%  -";
 
 #[test]
 fn list_table_hides_disabled_by_default_and_marks_the_active_profile() {

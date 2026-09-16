@@ -1967,7 +1967,7 @@ fn a_running_check_renders_a_bar_shaped_provider_cache_too() {
 
     let text = monitor_text("d-bars-0");
     assert!(
-        text.contains("; quota: pro: 5h 12.5%, 7d 48%, 30d 3%"),
+        text.contains("; quota: pro: 5h 12%, 7d 48%, 30d 3%"),
         "the provider's own bars and plan reach the check: {text}",
     );
     assert!(

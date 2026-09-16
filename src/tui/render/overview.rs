@@ -21,6 +21,7 @@ use super::usage::{eta_left_secs, window_rate_unit};
 use crate::fallback::{
     BlockedReason, SwitchAction, blocked_reason, next_target, soonest_resume, threshold_for,
 };
+use crate::format::pct_whole;
 use crate::profile::{AppConfig, Profile};
 use crate::providers::Provider;
 use crate::usage::{
@@ -995,7 +996,7 @@ fn chain_row(cfg: &AppConfig, name: &crate::profile::ProfileName, ctx: ChainRowC
             spans.extend(gauge_spans(pct, threshold, gauge_w));
             let (figure, figure_style) = match pct {
                 Some(v) => (
-                    format!("  {v:>3.0}"),
+                    format!("  {:>3}", pct_whole(v)),
                     Style::default().fg(theme::util_color(v)),
                 ),
                 None => ("    —".to_string(), theme::faint()),

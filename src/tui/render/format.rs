@@ -6,7 +6,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
 use super::super::theme;
-use crate::format::account_tier;
+use crate::format::{account_tier, pct_whole};
 use crate::profile::{AppState, ClockFormat, Profile, ResetDisplay};
 use crate::usage::{
     FetchStatus, ProfileActivity, UsageWindow, humanize_duration, iso_to_epoch_secs, now_epoch_secs,
@@ -152,7 +152,7 @@ pub(crate) fn window_summary_spans_bracketed_at(
             Span::styled("[", bracket),
             Span::styled(bar_string_with_cells(pct, 10), fill_style),
             Span::styled("]", bracket),
-            Span::styled(format!(" {:>3.0}%", pct), fill_style),
+            Span::styled(format!(" {:>3}%", pct_whole(pct)), fill_style),
         ];
         if let Some(secs) = reset_in_secs_at(window, now) {
             let style = reset_style.unwrap_or_else(theme::faint);
@@ -165,7 +165,7 @@ pub(crate) fn window_summary_spans_bracketed_at(
             Span::styled("[", bracket),
             Span::styled(bar_string_with_cells(pct, 10), fill_style),
             Span::styled("]", bracket),
-            Span::styled(format!(" {:>3.0}%", pct), fill_style),
+            Span::styled(format!(" {:>3}%", pct_whole(pct)), fill_style),
         ]
     } else if include_bar && width >= 12 {
         // [███░░░] XX%  — bar shrinks to fit
@@ -174,10 +174,10 @@ pub(crate) fn window_summary_spans_bracketed_at(
             Span::styled("[", bracket),
             Span::styled(bar_string_with_cells(pct, bar_cells), fill_style),
             Span::styled("]", bracket),
-            Span::styled(format!(" {:>3.0}%", pct), fill_style),
+            Span::styled(format!(" {:>3}%", pct_whole(pct)), fill_style),
         ]
     } else {
-        vec![Span::styled(format!("{pct:>3.0}%"), fill_style)]
+        vec![Span::styled(format!("{:>3}%", pct_whole(pct)), fill_style)]
     }
 }
 

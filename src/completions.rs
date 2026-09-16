@@ -14,7 +14,7 @@ const BASH_TEMPLATE: &str = r#"_clauth() {
     if [ "$COMP_CWORD" -eq 1 ]; then
         local profiles
         profiles=$(clauth __complete 2>/dev/null)
-        COMPREPLY=( $(compgen -W "${profiles} start login capture delete disable enable rolling-token static-token which list jobs sessions resume info daemon status mcp herdr completions --theme" -- "${cur}") )
+        COMPREPLY=( $(compgen -W "${profiles} start login capture delete disable enable rolling-token static-token which statusline list jobs sessions resume info daemon status mcp herdr completions --theme" -- "${cur}") )
     elif [ "$prev" = "--theme" ]; then
         COMPREPLY=( $(compgen -W "full compatible" -- "${cur}") )
     elif [ "${COMP_WORDS[1]}" = "login" ] && [ "${cur:0:2}" = "--" ]; then
@@ -23,6 +23,8 @@ const BASH_TEMPLATE: &str = r#"_clauth() {
         COMPREPLY=( $(compgen -W "--isolated --with-fallback" -- "${cur}") )
     elif [ "${COMP_WORDS[1]}" = "daemon" ] && [ "${cur:0:2}" = "--" ]; then
         COMPREPLY=( $(compgen -W "--standby --no-standby --replace --status --listen --cert --key --print-token --rotate-token" -- "${cur}") )
+    elif [ "${COMP_WORDS[1]}" = "statusline" ] && [ "${cur:0:2}" = "--" ]; then
+        COMPREPLY=( $(compgen -W "--to --token-file --forget" -- "${cur}") )
     elif [ "$prev" = "--isolated" ] || [ "$prev" = "--with-fallback" ] || [ "$prev" = "--profile" ]; then
         local profiles
         profiles=$(clauth __complete 2>/dev/null)
@@ -81,6 +83,7 @@ _clauth() {
             'rolling-token[serve a profile a rolling token from its usage chain]' \
             'static-token[restore the static setup-token mint, or --clear the long-lived token]' \
             'which[print profile owning the loaded credentials]' \
+            'statusline[record the rate-limit windows Claude Code reports on stdin]' \
             'list[list accounts as a table with per-profile usage]' \
             'jobs[list the delegate jobs clauth is holding (add --json)]' \
             'sessions[list Claude Code sessions (add --json / --tokens)]' \
@@ -148,6 +151,11 @@ _clauth() {
             '--key[private key for --cert]' \
             '--print-token[print the REST API auth token and exit]' \
             '--rotate-token[replace the REST API auth token and exit]'
+    elif (( CURRENT >= 3 )) && [[ "${words[2]}" == statusline ]]; then
+        _values 'flag' \
+            '--to[daemon to post readings to, as the FQDN its certificate names]' \
+            '--token-file[read the daemon token from a file instead of prompting]' \
+            '--forget[stop forwarding; record readings here only]'
     elif (( CURRENT >= 3 )) && [[ "${words[2]}" == status ]]; then
         _values 'flag' '--json[print the status snapshot as JSON]' '--all[also list disabled profiles]' '--disabled[also list disabled profiles]'
     elif (( CURRENT >= 3 )) && [[ "${words[2]}" == list ]]; then
@@ -171,6 +179,7 @@ complete -c clauth -f -n __fish_is_first_token -a enable -d "Restore a disabled 
 complete -c clauth -f -n __fish_is_first_token -a rolling-token -d "Serve a profile a rolling token from its usage chain"
 complete -c clauth -f -n __fish_is_first_token -a static-token -d "Restore the static setup-token mint, or --clear the long-lived token"
 complete -c clauth -f -n __fish_is_first_token -a which -d "Print profile owning the loaded credentials"
+complete -c clauth -f -n __fish_is_first_token -a statusline -d "Record the rate-limit windows Claude Code reports on stdin"
 complete -c clauth -f -n __fish_is_first_token -a list -d "List accounts as a table with per-profile usage"
 complete -c clauth -f -n __fish_is_first_token -a jobs -d "List the delegate jobs clauth is holding"
 complete -c clauth -f -n __fish_is_first_token -a sessions -d "List Claude Code sessions"
@@ -197,6 +206,9 @@ complete -c clauth -f -n "__fish_seen_subcommand_from start login capture delete
 complete -c clauth -f -n "__fish_seen_subcommand_from start" -a --isolated -d "Clean isolated runtime; drops operator config"
 complete -c clauth -f -n "__fish_seen_subcommand_from start" -a --with-fallback -d "Follow the fallback chain; needs a running daemon"
 complete -c clauth -f -n "__fish_seen_subcommand_from which" -a --json -d "Emit JSON"
+complete -c clauth -f -n "__fish_seen_subcommand_from statusline" -a --to -d "Daemon to post readings to, as the FQDN its certificate names"
+complete -c clauth -f -n "__fish_seen_subcommand_from statusline" -a --token-file -d "Read the daemon token from a file instead of prompting"
+complete -c clauth -f -n "__fish_seen_subcommand_from statusline" -a --forget -d "Stop forwarding; record readings here only"
 complete -c clauth -f -n "__fish_seen_subcommand_from sessions" -a --json -d "Emit the stable machine-readable array"
 complete -c clauth -f -n "__fish_seen_subcommand_from jobs" -a --json -d "Emit the stable machine-readable array"
 complete -c clauth -f -n "__fish_seen_subcommand_from sessions" -a --tokens -d "Add token totals + cost; reads every transcript in full"

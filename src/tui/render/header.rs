@@ -15,6 +15,7 @@ use ratatui::widgets::Paragraph;
 use super::super::app::{App, Tab};
 use super::super::theme;
 use super::format::{bar_string_with_cells, fixed_split};
+use crate::format::pct_whole;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -141,11 +142,11 @@ fn gauge_spans(fit: GaugeFit, name: &str, pct: Option<f64>, elapsed_ms: u64) -> 
                 style,
             ));
             spans.push(Span::styled("]", theme::dim()));
-            spans.push(Span::styled(format!(" {pct:.0}%"), style));
+            spans.push(Span::styled(format!(" {}%", pct_whole(pct)), style));
         }
         Some(pct) => {
             spans.push(Span::styled(
-                format!("{pct:.0}%"),
+                format!("{}%", pct_whole(pct)),
                 Style::default().fg(theme::util_color(pct)),
             ));
         }

@@ -182,6 +182,21 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Record the rate-limit windows Claude Code hands its status line
+    ///
+    /// Reads the status line's JSON payload on stdin and stores the 5h/7d
+    /// figures against the profile owning this session, so the display can show
+    /// the number Claude Code itself shows instead of the rounded one `/usage`
+    /// returns. Costs no request and no tokens.
+    ///
+    /// Prints nothing — a status line's stdout is the rendered line. Wire it in
+    /// by teeing the payload: `printf '%s' "$input" | clauth statusline &`.
+    ///
+    /// With --to, the reading is also posted to a `clauth daemon --listen` on
+    /// another host, which is what puts a remote session's floored figure on the
+    /// machine that owns the account.
+    Statusline(StatuslineArgs),
+
     /// List accounts as a table with each profile's usage
     ///
     /// Reads the same on-disk usage caches `status --json` prints, so the
@@ -408,6 +423,37 @@ pub(crate) enum Command {
     /// precedence the hand-rolled dispatcher had.
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+/// `clauth statusline`'s flags: the hook itself takes none, and these three
+/// configure where its readings go.
+///
+/// Setup is sticky, like `clauth daemon`'s token: `--to` is typed once and
+/// stored in `~/.clauth/statusline.json`, after which a bare `clauth statusline`
+/// forwards there forever. That matters more here than elsewhere — the hook runs
+/// from a shell snippet nobody wants to carry a hostname, a port and a secret.
+#[derive(Args, Debug)]
+pub(crate) struct StatuslineArgs {
+    /// Daemon to post readings to, as the FQDN its certificate names.
+    /// Port defaults to 8443. Stores it and exits; reads no payload.
+    ///
+    /// It has to be the name, not an address: the daemon serves that host's own
+    /// lego certificate, so a bare IP fails verification whatever is listening.
+    #[arg(long, value_name = "HOST[:PORT]")]
+    pub(crate) to: Option<String>,
+    /// Read the daemon's bearer token from a file instead of prompting.
+    ///
+    /// There is deliberately no --token: an argument is visible in `ps` and in
+    /// shell history, and this one is a password. Without this flag the token
+    /// is read echo-off from the terminal, or from stdin when piped.
+    #[arg(long, value_name = "PATH", requires = "to")]
+    pub(crate) token_file: Option<PathBuf>,
+    /// Stop forwarding: forget the daemon and record readings here only.
+    ///
+    /// Removes ~/.clauth/statusline.json. The hook keeps working; its readings
+    /// go back to this host's own profiles.
+    #[arg(long, conflicts_with_all = ["to", "token_file"])]
+    pub(crate) forget: bool,
 }
 
 /// `clauth start`'s flags, the profile, and the `claude` passthrough.
