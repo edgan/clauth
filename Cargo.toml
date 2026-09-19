@@ -116,6 +116,15 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# A release build that can be debugged. `[profile.release]` strips, which leaves a
+# core dump from a shipped binary with no symbols at all — the state the
+# 2026-09-04 `clauth proxy` segfault was found in. Deploy this profile's binary
+# when a crash has to be attributable; the shipped one stays stripped.
+[profile.release-debug]
+inherits = "release"
+strip = false
+debug = 1
+
 [lints.rust]
 # `deny` rather than the fleet default `forbid`, because three sites are
 # deliberately allowed and `forbid` admits no override at all: signal delivery in

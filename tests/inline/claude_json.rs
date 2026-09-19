@@ -454,3 +454,189 @@ fn known_paths_reach_per_session_copies_and_still_exclude_isolated() {
     );
     assert_eq!(paths.len(), 4, "no member beyond those four: {paths:#?}");
 }
+
+// ── Claude Code's first-run gate ─────────────────────────────────────────────
+//
+// A replica gets working credentials from `clauth proxy` and is never meant to
+// log in. Claude Code still gated its first run on `hasCompletedOnboarding`
+// rather than on whether it could authenticate, so a fresh replica asked for a
+// login it did not need — with a token that demonstrably worked. These pin the
+// seed that closes that, and the two ways it could do more harm than good:
+// clobbering a file Claude Code is mid-write on, and touching a file that
+// needed no change.
+
+/// The reported case: a machine where Claude Code has never run. The file has
+/// to be CREATED, because the flag is read on the first start — a seed that
+/// waited for Claude Code to write the file would always be one run too late.
+#[test]
+fn a_machine_that_has_never_run_claude_code_is_given_the_flag() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = HomeSandbox::new();
+    let path = home.home().join(".claude.json");
+    assert!(
+        !path.exists(),
+        "precondition: Claude Code has never run here"
+    );
+
+    seed_home_onboarding().expect("seed");
+
+    assert_eq!(
+        read_json(&path),
+        json!({"hasCompletedOnboarding": true}),
+        "the seeded file carries the flag and nothing else; Claude Code fills in the rest"
+    );
+    let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "owner-only for the window before Claude Code's first write, got {mode:#o}"
+    );
+}
+
+/// Claude Code owns this file. Seeding one key must not cost any of the others,
+/// nor reorder them — `serde_json`'s `preserve_order` is what keeps a rewritten
+/// file recognisable, and a diff of the whole file is not a seed.
+#[test]
+fn seeding_keeps_every_other_key_and_its_order() {
+    let home = HomeSandbox::new();
+    let path = home.home().join(".claude.json");
+    write_json(
+        &path,
+        &json!({
+            "numStartups": 7,
+            "userID": "abc",
+            "oauthAccount": {"emailAddress": "claude@example.org"},
+            "projects": {"/tmp/x": {"allowedTools": []}},
+        }),
+    );
+
+    seed_home_onboarding().expect("seed");
+
+    let after = read_json(&path);
+    assert_eq!(after["numStartups"], json!(7));
+    assert_eq!(after["userID"], json!("abc"));
+    assert_eq!(
+        after["oauthAccount"]["emailAddress"],
+        json!("claude@example.org")
+    );
+    assert_eq!(after["projects"]["/tmp/x"]["allowedTools"], json!([]));
+    assert_eq!(after["hasCompletedOnboarding"], json!(true));
+
+    let keys: Vec<&String> = after.as_object().expect("an object").keys().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "numStartups",
+            "userID",
+            "oauthAccount",
+            "projects",
+            "hasCompletedOnboarding"
+        ],
+        "existing keys keep their order and the flag lands after them"
+    );
+}
+
+/// The regression that matters. `sync_once` resolves by newest mtime, so a seed
+/// that rewrote an already-correct file would make home win every tick and
+/// stomp each runtime copy's own fields — on a replica that is every pull,
+/// forever.
+#[test]
+fn an_already_onboarded_file_is_not_rewritten_at_all() {
+    let home = HomeSandbox::new();
+    let path = home.home().join(".claude.json");
+    write_json(
+        &path,
+        &json!({"hasCompletedOnboarding": true, "numStartups": 3}),
+    );
+    set_mtime(&path, t(5));
+
+    seed_home_onboarding().expect("seed");
+
+    let mtime = fs::metadata(&path)
+        .expect("metadata")
+        .modified()
+        .expect("mtime");
+    assert_eq!(
+        mtime,
+        t(5),
+        "an already-onboarded file must not be touched; a bumped mtime hands \
+         `sync_once` a false winner"
+    );
+}
+
+/// Claude Code rewrites this file in place, so a read can land mid-write. The
+/// half-written bytes are Claude Code's, not ours to replace.
+#[test]
+fn a_claude_json_caught_mid_write_is_left_alone() {
+    let home = HomeSandbox::new();
+    let path = home.home().join(".claude.json");
+    fs::write(&path, b"{ \"numStartups\": 3, \"hasComp").expect("write");
+
+    seed_home_onboarding().expect("seed is best-effort, never an error");
+
+    assert_eq!(
+        fs::read(&path).expect("read"),
+        b"{ \"numStartups\": 3, \"hasComp",
+        "a file that does not parse is left byte-for-byte alone"
+    );
+}
+
+/// Valid JSON that is not an object has no place to put the flag. Replacing it
+/// wholesale would be inventing state rather than seeding it.
+#[test]
+fn a_claude_json_that_is_not_an_object_is_left_alone() {
+    let home = HomeSandbox::new();
+    let path = home.home().join(".claude.json");
+    write_json(&path, &json!([1, 2, 3]));
+
+    seed_home_onboarding().expect("seed");
+
+    assert_eq!(read_json(&path), json!([1, 2, 3]));
+}
+
+/// `false` is what a half-finished onboarding leaves behind, and it is exactly
+/// the state that keeps prompting. On a replica the login it asks for is one
+/// this host cannot perform, so the flag is corrected rather than respected.
+#[test]
+fn a_half_finished_onboarding_is_completed() {
+    let home = HomeSandbox::new();
+    let path = home.home().join(".claude.json");
+    write_json(
+        &path,
+        &json!({"hasCompletedOnboarding": false, "numStartups": 1}),
+    );
+
+    seed_home_onboarding().expect("seed");
+
+    assert_eq!(read_json(&path)["hasCompletedOnboarding"], json!(true));
+    assert_eq!(read_json(&path)["numStartups"], json!(1));
+}
+
+/// The two writers of this file run in the same apply, one after the other. The
+/// strip must take the identity block and leave the flag, or a replica would
+/// re-prompt on the first switch the origin makes.
+#[test]
+fn stripping_the_identity_block_leaves_the_onboarding_flag() {
+    let home = HomeSandbox::new();
+    let path = home.home().join(".claude.json");
+    write_json(&path, &json!({"numStartups": 2}));
+
+    seed_home_onboarding().expect("seed");
+    // Claude Code boots and caches the identity it derived from the token.
+    let mut obj = read_json(&path);
+    obj["oauthAccount"] = json!({"accountUuid": "uuid-1"});
+    write_json(&path, &obj);
+
+    strip_home_oauth_account().expect("strip");
+
+    let after = read_json(&path);
+    assert!(
+        after.get("oauthAccount").is_none(),
+        "the stale identity goes"
+    );
+    assert_eq!(
+        after["hasCompletedOnboarding"],
+        json!(true),
+        "the onboarding flag stays; losing it would re-prompt on the next switch"
+    );
+}

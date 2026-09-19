@@ -13,6 +13,7 @@
 
 **Headless**
 - [Daemon](Daemon)
+- [Proxy](Proxy)
 - [Claude Code plugin](Claude-Code-Plugin)
 - [herdr plugin](Herdr-Plugin)
 

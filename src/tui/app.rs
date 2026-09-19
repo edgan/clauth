@@ -7025,6 +7025,15 @@ fn start_api_relogin(app: &mut App) {
 /// (divergence-gated in `apply_login`). A second ⏎ while one is in flight
 /// re-expands the progress modal instead of starting another login.
 fn start_login(app: &mut App, name: String, is_new: bool) {
+    // The CLI refuses this on a replica and the TUI has to as well, because
+    // here it is a trap rather than an inconvenience: a pair minted on a
+    // mirroring host has no refresher behind it (`spawn_refresher` stays down),
+    // so it works for the few hours its access token lasts and then dies with
+    // nothing on this machine able to renew it.
+    if let Err(e) = crate::proxy::refuse_if_replica("log in") {
+        app.toast(ToastKind::Warning, e.to_string());
+        return;
+    }
     if let Some(session) = app.login.as_ref() {
         // A ⏎ aimed at a different account can't start a second login — say
         // so instead of silently re-showing the in-flight session's modal.

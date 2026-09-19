@@ -18,12 +18,11 @@ use super::*;
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::Command;
 
 use crate::daemon::api::routes::ApiContext;
 use crate::daemon::api::token::AuthToken;
 use crate::profile::{AppConfig, AppState};
-use crate::testutil::HomeSandbox;
+use crate::testutil::{HomeSandbox, SERVER_NAME, generate_chain};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -54,146 +53,6 @@ fn ctx() -> std::sync::Arc<ApiContext> {
     }));
     let status_path = crate::profile::clauth_dir().unwrap().join("status.json");
     ApiContext::new(config, status_path, AuthToken::from_plaintext(TOKEN), None)
-}
-
-/// The name the generated certificate is issued for, and the name the client
-/// asks for. Not this host's real FQDN: the point is the handshake, not the
-/// lookup that finds the file.
-const SERVER_NAME: &str = "localhost";
-
-fn openssl(args: &[&str]) -> bool {
-    Command::new("openssl")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Turns a missing `openssl` from a silent skip into a failure.
-///
-/// [`generate_chain`] is the only coverage the TLS listener has, and a skipped
-/// test is indistinguishable from a passing one in a summary line — so an image
-/// that lost `openssl` would report green over an entirely untested listener,
-/// indefinitely, with nothing to notice. CI sets this on the platforms whose
-/// images carry `openssl`; a developer box without it still runs the rest of the
-/// suite, and now says on stderr which tests it did not run.
-const REQUIRE_TLS_FIXTURE_ENV: &str = "CLAUTH_REQUIRE_TLS_FIXTURE";
-
-/// Announce — or refuse — a run with no `openssl` to build certificates with.
-fn no_tls_fixture() {
-    assert!(
-        std::env::var(REQUIRE_TLS_FIXTURE_ENV).as_deref() != Ok("1"),
-        "`openssl` is not on PATH and {REQUIRE_TLS_FIXTURE_ENV}=1. Every TLS test would \
-         have been skipped, and a skip is indistinguishable from a pass — which is exactly \
-         what this variable exists to catch. Install openssl, or unset the variable to \
-         accept an untested TLS listener on this machine"
-    );
-    crate::logline::logline!(
-        "clauth tests: `openssl` is not on PATH — SKIPPING every test that needs a \
-         certificate, which is all TLS coverage there is. Set {REQUIRE_TLS_FIXTURE_ENV}=1 \
-         to make this a failure instead"
-    );
-}
-
-/// A CA, and a `localhost` certificate signed by it, laid out the way lego
-/// writes them. `Err` when `openssl` is missing AND the run demands a fixture;
-/// `Ok(None)` only for a missing `openssl` on a box that accepted the skip.
-///
-/// A present-but-failing `openssl` is an `Err` too, not a skip: a build that
-/// rejects one of the generation flags is exactly that case, and a leg that
-/// CI marks as required was silently carrying zero listener coverage while
-/// reporting green — a skipped test is indistinguishable from a passing one
-/// in a summary line.
-fn generate_chain(
-    dir: &Path,
-) -> Result<Option<(crate::daemon::api::tls::CertPaths, std::path::PathBuf)>, String> {
-    // Checked up front and separately from the generation below, so "no openssl
-    // here" (a skip) is never confused with "openssl is present and failing" (a
-    // broken fixture, which errors below).
-    if !openssl(&["version"]) {
-        no_tls_fixture();
-        return Ok(None);
-    }
-
-    let ca_key = dir.join("ca.key");
-    let ca_crt = dir.join("ca.crt");
-    let csr = dir.join("server.csr");
-    let ext = dir.join("leaf.ext");
-    let paths = crate::daemon::api::tls::lego_paths_in(dir, SERVER_NAME);
-
-    let write_ext = std::fs::write(
-        &ext,
-        format!("subjectAltName=DNS:{SERVER_NAME}\nbasicConstraints=critical,CA:FALSE\n"),
-    );
-    if let Err(e) = write_ext {
-        return Err(format!("failed to write the leaf extension file: {e}"));
-    }
-    let ca_args = [
-        "req",
-        "-x509",
-        "-newkey",
-        "ec",
-        "-pkeyopt",
-        "ec_paramgen_curve:P-256",
-        "-nodes",
-        "-keyout",
-        ca_key.to_str().ok_or("ca key path is not UTF-8")?,
-        "-out",
-        ca_crt.to_str().ok_or("ca crt path is not UTF-8")?,
-        "-days",
-        "3650",
-        "-subj",
-        "/CN=clauth-test-ca",
-        "-addext",
-        "basicConstraints=critical,CA:TRUE",
-    ];
-    let leaf_args = [
-        "req",
-        "-newkey",
-        "ec",
-        "-pkeyopt",
-        "ec_paramgen_curve:P-256",
-        "-nodes",
-        "-keyout",
-        paths.key.to_str().ok_or("leaf key path is not UTF-8")?,
-        "-out",
-        csr.to_str().ok_or("csr path is not UTF-8")?,
-        "-subj",
-        &format!("/CN={SERVER_NAME}"),
-    ];
-    let sign_args = [
-        "x509",
-        "-req",
-        "-in",
-        csr.to_str().ok_or("csr path is not UTF-8")?,
-        "-CA",
-        ca_crt.to_str().ok_or("ca crt path is not UTF-8")?,
-        "-CAkey",
-        ca_key.to_str().ok_or("ca key path is not UTF-8")?,
-        "-out",
-        paths.cert.to_str().ok_or("leaf crt path is not UTF-8")?,
-        "-days",
-        "3650",
-        "-extfile",
-        ext.to_str().ok_or("leaf ext path is not UTF-8")?,
-    ];
-    if !openssl(&ca_args) {
-        return Err("openssl failed to generate the test CA".to_string());
-    }
-    if !openssl(&leaf_args) {
-        return Err("openssl failed to generate the test leaf key".to_string());
-    }
-    if !openssl(&sign_args) {
-        return Err("openssl failed to sign the test leaf".to_string());
-    }
-    // lego's `<fqdn>.issuer.crt`: the chain the leaf does not carry itself.
-    let issuer = paths
-        .issuer
-        .as_deref()
-        .ok_or_else(|| "no issuer path for the lego layout".to_string())?;
-    std::fs::copy(&ca_crt, issuer).map_err(|e| format!("failed to copy the issuer chain: {e}"))?;
-    Ok(Some((paths, ca_crt)))
 }
 
 /// A present-but-failing `openssl` must fail the run, not skip it. The missing

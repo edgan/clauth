@@ -1836,8 +1836,36 @@ fn as_stored(at: SystemTime) -> SystemTime {
     at
 }
 
+/// Move a credential store's mtime so Claude Code notices it, for a caller
+/// outside the per-session swap executor.
+///
+/// `clauth proxy` needs exactly what [`touch_store`] does and for exactly the
+/// reason documented there: it repoints the global credential link when the
+/// origin switches, and the store it repoints TO was often written on an earlier
+/// pull, so its mtime can equal the one Claude Code memoized for the store it is
+/// moving away from. That reads as no change, and the session keeps
+/// authenticating as the previous account with nothing reporting a problem.
+///
+/// A thin wrapper rather than a second implementation: the receipt discipline,
+/// the truncating-filesystem guard and the `memoized + 1s` fallback are subtle
+/// enough that a copy would drift. Call it BEFORE the repoint, like the swap
+/// executor does.
+pub(crate) fn touch_credential_store(
+    member: &ProfileName,
+    store: &Path,
+    memoized: Option<SystemTime>,
+) -> Result<()> {
+    touch_store(
+        &SwapPlan {
+            member: member.clone(),
+            store: store.to_path_buf(),
+        },
+        memoized,
+    )
+}
+
 /// A file's mtime, or `None` when it has none to read.
-fn file_mtime(path: &Path) -> Option<SystemTime> {
+pub(crate) fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 

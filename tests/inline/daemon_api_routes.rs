@@ -59,6 +59,21 @@ fn seeded_config() -> ConfigHandle {
     }))
 }
 
+/// `seeded_config` builds an in-memory `AppConfig`; the mirror route reads
+/// `profiles.toml` off disk instead, so a mirror test has to write it.
+///
+/// Reading from disk is deliberate on the production side: a `clauth <profile>`
+/// run by the CLI writes `profiles.toml` immediately, and a daemon that has not
+/// reloaded yet would otherwise mirror a roster that is already stale.
+fn seed_state_on_disk() {
+    crate::profile::save_app_state(&AppState {
+        active_profile: Some("alpha".into()),
+        profiles: vec!["alpha".into(), "beta".into()],
+        ..Default::default()
+    })
+    .expect("write profiles.toml");
+}
+
 fn ctx_with(config: ConfigHandle) -> std::sync::Arc<ApiContext> {
     let status_path = crate::profile::clauth_dir()
         .expect("clauth dir")
@@ -98,7 +113,7 @@ fn req(method: &str, path: &str, bearer: Option<&str>, body: &str) -> Request {
     }
 }
 
-/// A conditional GET, for the feed's 304 and `?wait` paths.
+/// A conditional GET, for the mirror route's 304 path.
 fn req_tagged(path: &str, bearer: Option<&str>, etag: &str) -> Request {
     Request {
         if_none_match: Some(etag.to_string()),
@@ -496,7 +511,13 @@ fn only_the_api_v1_prefix_is_served() {
     let _home = HomeSandbox::new();
     let ctx = ctx_with(seeded_config());
 
-    for path in ["/v1/health", "/v1/status", "/health", "/api/health"] {
+    for path in [
+        "/v1/health",
+        "/v1/status",
+        "/v1/mirror",
+        "/health",
+        "/api/health",
+    ] {
         assert_eq!(
             handle(&ctx, &req("GET", path, Some(TOKEN), "")).status,
             404,
@@ -909,6 +930,203 @@ fn a_poisoned_gate_does_not_wedge_the_switch_route() {
             .as_deref(),
         Some("beta"),
         "the switch must still land in state, not just in the response"
+    );
+}
+
+// ── GET /api/v1/mirror ──────────────────────────────────────────────────────────
+
+/// THE test for this feature. A replica must be unable to advance a single-use
+/// refresh chain, and the only way to guarantee that is for the refresh token
+/// never to leave this host. `stored_profile` deliberately gives every profile
+/// a refresh token, so a body that carried one would show up here.
+///
+/// Asserted against the serialized BYTES rather than the parsed struct: what
+/// matters is what crosses the wire, and a future field that reintroduced the
+/// secret under another name would still be caught.
+#[test]
+fn the_mirror_body_never_carries_a_refresh_token() {
+    let _home = HomeSandbox::new();
+    seed_state_on_disk();
+    let ctx = ctx_with(seeded_config());
+
+    let response = handle(&ctx, &req("GET", "/api/v1/mirror", Some(TOKEN), ""));
+    assert_eq!(response.status, 200);
+
+    let body = String::from_utf8(response.body).expect("utf8 body");
+    assert!(
+        body.contains("alpha"),
+        "the body should carry the accounts: {body}"
+    );
+    // `creds` stores "<name>-refresh" as each profile's refresh token, so the
+    // secret VALUE is what must be absent. Matching on the field name would be
+    // vacuous: `refreshToken` contains the word either way.
+    for name in ["alpha", "beta"] {
+        assert!(
+            !body.contains(&format!("{name}-refresh")),
+            "{name}'s refresh token reached the wire: {body}"
+        );
+    }
+    // `OAuthToken` skips its `None` fields, so a stripped credential omits the
+    // key rather than nulling it. That is the same shape `session-token.json`
+    // already has on disk, which is the file a CLA-SPLIT switch installs as the
+    // live `.credentials.json` today, so Claude Code is known to read it.
+    assert!(
+        !body.contains("refreshToken"),
+        "the key should be absent entirely once stripped: {body}"
+    );
+    assert!(
+        body.contains("\"accessToken\":\"alpha\""),
+        "the access token is what a replica actually spends, so it does cross: {body}"
+    );
+}
+
+/// Auth is checked before dispatch, so the route that serves credentials is
+/// behind the token like every other one, and an unauthenticated caller cannot
+/// tell it apart from a path that does not exist.
+#[test]
+fn mirror_needs_the_token() {
+    let _home = HomeSandbox::new();
+    let ctx = ctx_with(seeded_config());
+
+    let response = handle(&ctx, &req("GET", "/api/v1/mirror", None, ""));
+    assert_eq!(response.status, 401);
+    assert!(response.challenge);
+}
+
+/// A wrong verb on a real route is 405, so a client with a typo'd method is
+/// told which half is wrong rather than hunting a path that is right.
+#[test]
+fn mirror_rejects_a_wrong_method_with_405() {
+    let _home = HomeSandbox::new();
+    let ctx = ctx_with(seeded_config());
+
+    let response = handle(&ctx, &req("POST", "/api/v1/mirror", Some(TOKEN), ""));
+    assert_eq!(response.status, 405);
+}
+
+/// The tag digests the CONTENT, not the timestamp, so a replica polling an idle
+/// origin gets a bodyless 304. Tagging `generated_at` too would change the
+/// value on every request and make the conditional path dead weight.
+#[test]
+fn an_unchanged_mirror_answers_304_with_no_body() {
+    let _home = HomeSandbox::new();
+    seed_state_on_disk();
+    let ctx = ctx_with(seeded_config());
+
+    let first = handle(&ctx, &req("GET", "/api/v1/mirror", Some(TOKEN), ""));
+    let etag = first.etag.clone().expect("a 200 carries an ETag");
+
+    let second = handle(&ctx, &req_tagged("/api/v1/mirror", Some(TOKEN), &etag));
+    assert_eq!(second.status, 304);
+    assert!(second.body.is_empty(), "a 304 carries no body");
+    assert_eq!(
+        second.etag.as_deref(),
+        Some(etag.as_str()),
+        "the tag is repeated so a client that dropped its copy can re-arm"
+    );
+}
+
+/// A stale tag serves the accounts again. This is what carries a rotated access
+/// token across, so getting it wrong would strand every replica on the token it
+/// first pulled.
+#[test]
+fn a_stale_tag_serves_the_body_again() {
+    let _home = HomeSandbox::new();
+    seed_state_on_disk();
+    let ctx = ctx_with(seeded_config());
+
+    let response = handle(
+        &ctx,
+        &req_tagged("/api/v1/mirror", Some(TOKEN), "\"stale\""),
+    );
+    assert_eq!(response.status, 200);
+    assert!(!response.body.is_empty());
+}
+
+/// `?wait` with a matching tag holds the request instead of answering 304 at
+/// once. That hold is what makes a switch on the origin reach a replica in about
+/// a round trip rather than on its next poll.
+#[test]
+fn a_wait_with_a_current_tag_is_held_until_it_expires() {
+    let _home = HomeSandbox::new();
+    seed_state_on_disk();
+    let ctx = ctx_with(seeded_config());
+
+    let first = handle(&ctx, &req("GET", "/api/v1/mirror", Some(TOKEN), ""));
+    let etag = first.etag.clone().expect("a 200 carries an ETag");
+
+    let started = std::time::Instant::now();
+    let held = handle(
+        &ctx,
+        &req_tagged("/api/v1/mirror?wait=1", Some(TOKEN), &etag),
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!(held.status, 304, "nothing moved, so the wait times out");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "the request has to actually be held; took {elapsed:?}"
+    );
+}
+
+/// A wait ends the moment the accounts move, which is the whole point: the
+/// replica learns about a switch without a poll interval in the way.
+#[test]
+fn a_wait_returns_as_soon_as_the_accounts_move() {
+    let _home = HomeSandbox::new();
+    seed_state_on_disk();
+    let ctx = ctx_with(seeded_config());
+
+    let first = handle(&ctx, &req("GET", "/api/v1/mirror", Some(TOKEN), ""));
+    let etag = first.etag.clone().expect("a 200 carries an ETag");
+
+    // Switch the active account from another thread while the wait is in flight.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        crate::profile::save_app_state(&AppState {
+            active_profile: Some("beta".into()),
+            profiles: vec!["alpha".into(), "beta".into()],
+            ..Default::default()
+        })
+        .expect("switch on the origin");
+    });
+
+    let started = std::time::Instant::now();
+    let woken = handle(
+        &ctx,
+        &req_tagged("/api/v1/mirror?wait=30", Some(TOKEN), &etag),
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!(woken.status, 200, "a change ends the wait with the body");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "it must return on the change, not on the 30s deadline; took {elapsed:?}"
+    );
+    let body = String::from_utf8(woken.body).expect("utf8");
+    assert!(body.contains("\"active_profile\":\"beta\""), "got {body}");
+}
+
+/// Without `?wait` the route answers at once, as it always did. A client that
+/// sends no tag has nothing to wait for either.
+#[test]
+fn a_request_without_wait_is_never_held() {
+    let _home = HomeSandbox::new();
+    seed_state_on_disk();
+    let ctx = ctx_with(seeded_config());
+
+    let first = handle(&ctx, &req("GET", "/api/v1/mirror", Some(TOKEN), ""));
+    let etag = first.etag.clone().expect("ETag");
+
+    let started = std::time::Instant::now();
+    let plain = handle(&ctx, &req_tagged("/api/v1/mirror", Some(TOKEN), &etag));
+    assert_eq!(plain.status, 304);
+    // A tagless wait has nothing to compare against, so it answers immediately.
+    let tagless = handle(&ctx, &req("GET", "/api/v1/mirror?wait=30", Some(TOKEN), ""));
+    assert_eq!(tagless.status, 200);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "neither call should have been held"
     );
 }
 

@@ -14,9 +14,11 @@
 //!     the bearer token crosses this connection on every request.
 //!   * **Token always.** Every route, health included, needs
 //!     `Authorization: Bearer <token>`; see [`token`].
-//!   * **Two operations.** Read the status feed, switch the active account. The
-//!     switch goes through the same action the MCP tool uses, so anything
-//!     needing human eyes is refused here too ([`routes`]).
+//!   * **Three operations.** Read the status feed, switch the active account,
+//!     and clone the accounts for a `clauth proxy` elsewhere. The switch goes
+//!     through the same action the MCP tool uses, so anything needing human eyes
+//!     is refused here too ([`routes`]). The clone carries no refresh token, so
+//!     a replica can spend an account but never rotate its chain.
 //!   * **Thread per connection**, capped and time-bounded. Connections persist
 //!     across requests and serve pipelined ones in order; see [`http`] for the
 //!     framing rules that makes safe. No async runtime.

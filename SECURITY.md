@@ -25,6 +25,7 @@ Per-profile state lives under `~/.clauth/`. On Unix that whole tree is owner-onl
 | `~/.clauth/profiles/<name>/usage_cache.json` | last-known utilization and plan | `0600` |
 | `~/.clauth/profiles/<name>/runtime-<sid>/settings.json` | one live session's Claude Code settings. An endpoint profile's key is **not** in it: the file carries an `apiKeyHelper` line naming `clauth __api-key <profile>`, which Claude Code runs per request to mint the key | `0600` |
 | `~/.clauth/auth_token.json` | bearer token for the daemon's REST API, and the `tier` saying what it may do (`control` — everything the API exposes — is the only value today). Only if you have ever run `clauth daemon --listen`, `--print-token`, or `--rotate-token` | `0600` |
+| `~/.clauth/proxy.json` | the origin and bearer token `clauth proxy` mirrors from, only if you have ever run it. Its presence is also what marks the host a replica | `0600` |
 | `~/.clauth/tls.json` | which directory holds the REST API's lego certificate; written with the platform default the first time `clauth daemon --listen` starts. Not a secret — a path, no key material | `0600` |
 | `~/.clauth/jobs/<id>.json` | backgrounded `delegate` prompt + result | file `0600`, dir `0700` |
 | `~/.clauth/live_sessions/<sid>.json`, `~/.clauth/live_bare/<pid>` | liveness markers for running sessions: pid, profile name, working directory, flags. No credentials | file `0600`, dir `0700` |
@@ -62,12 +63,13 @@ Every request clauth makes, and what rides along with it:
 | `raw.githubusercontent.com/uwuclxdy/ai-pricelog/...` | model price table for the Tokens tab cost lens, fetched and disk-cached | no credentials |
 | `api.deepseek.com/user/balance` | only for profiles whose base URL is DeepSeek | that provider's API key |
 | `api.z.ai/api/monitor/usage/...` | only for profiles whose base URL is Z.ai | that provider's API key |
+| `https://<origin>:8443/api/v1/mirror` on the host you point `clauth proxy` at | one long-lived request, held open by the origin and renewed about every 50s | the origin's bearer token from `~/.clauth/proxy.json`. Certificate verification is not relaxed, so the origin has to answer to the name on its certificate |
 | `openrouter.ai/api/v1/credits` and `/api/v1/key` | only for profiles whose base URL is OpenRouter | that provider's API key |
 | an Alibaba console gateway (`bailian-cs.console.aliyun.com` or its regional twin for your site) | usage poll for a Model Studio profile, whose API key cannot read its own quota | that profile's stored `[console]` session, never its API key |
 | `bailian.console.aliyun.com` or `modelstudio.console.alibabacloud.com` | `clauth login` on a Model Studio profile, opened in your browser to capture that console session | no credentials; the callback comes back to a loopback listener |
 | a custom base URL you set | requests against an API-endpoint profile, plus a best-effort usage probe against that same origin | whatever you configured |
 
-Your stored Claude access tokens go to `api.anthropic.com` and nowhere else. Your refresh token goes to `platform.claude.com`, which is the token endpoint Claude Code's own client refreshes against: every pair is minted there, whether from a refresh or from the interactive `clauth login`, which follows Claude Code's OAuth flow by opening `claude.com` in your browser to authorize and posting the one-time code back to `platform.claude.com`. clauth runs no telemetry or analytics; it talks to the hosts above and no others.
+Your stored Claude access tokens go to `api.anthropic.com` and nowhere else. Your refresh token goes to `platform.claude.com`, which is the token endpoint Claude Code's own client refreshes against: every pair is minted there, whether from a refresh or from the interactive `clauth login`, which follows Claude Code's OAuth flow by opening `claude.com` in your browser to authorize and posting the one-time code back to `platform.claude.com`. `clauth proxy` is the one entry above that is not an Anthropic host: it is a machine you chose and pointed it at. clauth runs no telemetry or analytics; it talks to the hosts above and no others.
 
 ### Listening sockets
 
@@ -78,10 +80,20 @@ clauth binds a socket in exactly two places, both narrow:
 | `127.0.0.1:<random port>` | for the seconds `clauth login` waits for the browser redirect | loopback only; it checks the OAuth `state` and closes |
 | the address you pass to `clauth daemon --listen` | for as long as that daemon runs | wherever you bind it |
 
-`--listen` is off unless you ask for it, and it is the only way anything outside this machine can reach clauth. It is TLS-only (from this host's lego certificate, or the `--cert`/`--key` pair named on the command line, read at startup) and every route requires a bearer token, compared in constant time, stored at `~/.clauth/auth_token.json` and printed by `clauth daemon --print-token`. It exposes two operations, reading the status feed and switching the active account, and the feed it serves carries what `status.json` carries: names, tiers, percentages, timestamps, never a token or key. Connections persist and may be pipelined; `Content-Length` is the only framing accepted, chunked is refused, and any framing error closes the connection rather than resynchronizing, so the ambiguity request smuggling depends on does not arise. A connection slot is claimed at `accept()`, before the handshake and before any token is seen, so a peer reaching the port occupies one while connected; the clock bounds it — a peer that connects and says nothing gets the 10s first-request timeout, not the full connection lifetime — and an unauthenticated request is answered and closed at once, so no unauthenticated client can hold a slot.
+`--listen` is off unless you ask for it, and it is the only way anything outside this machine can reach clauth. It is TLS-only (from this host's lego certificate, or the `--cert`/`--key` pair named on the command line, read at startup) and every route requires a bearer token, compared in constant time, stored at `~/.clauth/auth_token.json` and printed by `clauth daemon --print-token`. It exposes four operations: reading the status feed, switching the active account, recording a rate-limit reading from a session on another machine, and cloning the accounts for a replica (see below). The feed itself carries what `status.json` carries: names, tiers, percentages, timestamps, never a token or key. Connections persist and may be pipelined; `Content-Length` is the only framing accepted, chunked is refused, and any framing error closes the connection rather than resynchronizing, so the ambiguity request smuggling depends on does not arise. A connection slot is claimed at `accept()`, before the handshake and before any token is seen, so a peer reaching the port occupies one while connected; the clock bounds it — a peer that connects and says nothing gets the 10s first-request timeout, not the full connection lifetime — and an unauthenticated request is answered and closed at once, so no unauthenticated client can hold a slot.
 Limits: 8 KiB of headers, 64 KiB of body, 32 concurrent connections, 100 requests and
 120 seconds per connection, a 10s deadline per read or write.
 `CLAUTH_NO_API=1` disables it. See `wiki/Daemon.md`.
+
+A third route, `GET /api/v1/mirror`, serves the accounts themselves so a `clauth proxy` on
+another machine can run Claude Code against them. It is served whenever the daemon is
+listening, guarded by that same single bearer token, so **anything holding that token can
+read credentials from that daemon**: the token is not a read-only feed credential. What
+crosses is an access token with the refresh token omitted entirely, never the refresh token
+itself. Anthropic's refresh chain is single-use, so a second machine holding one could
+revoke the origin's copy just by using it; a replica can therefore spend an account, for the
+few hours until that access token expires, but can never advance its chain. `clauth proxy`
+itself binds nothing; it only dials out. See `wiki/Proxy.md`.
 
 ## What acts on your behalf
 
