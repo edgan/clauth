@@ -181,6 +181,7 @@ fn model(id: &str, input: u64, output: u64, cache_read: u64, cache_create: u64) 
         output,
         cache_read,
         cache_create,
+        shape: Default::default(),
     }
 }
 
@@ -979,6 +980,66 @@ fn rate_retries_date_stamp_strip_repeated() {
         t.rate_at("m-20250801-20250802", "2026-08-19", 0)
             .map(|r| r.input),
         Some(1e-6)
+    );
+}
+
+/// A reseller's free variant, carried by no catalog row, prices at all-zero
+/// rates on every axis rather than dashing as unpriced.
+#[test]
+fn free_variant_prices_at_zero_on_a_full_walk_miss() {
+    let t = table(vec![eq_model("glm-5.3", 1.4e-6, 4.4e-6)]);
+    let r = t
+        .rate_at("z-ai/glm-5.3-free", "2026-08-19", 0)
+        .expect("a free variant prices rather than dashing");
+    assert_eq!(
+        (r.input, r.output, r.cache_read, r.cache_write),
+        (0.0, 0.0, 0.0, 0.0)
+    );
+    assert_eq!(
+        t.cost_at(
+            &model("z-ai/glm-5.3-free", 1_000_000, 500_000, 2_000_000, 0),
+            "2026-08-19",
+            0
+        ),
+        Some(0.0),
+        "no tokens cost anything on a free variant"
+    );
+    let mut hours = [HourTokens::default(); 24];
+    hours[9].input = 100_000;
+    assert_eq!(
+        t.cost_day("z-ai/glm-5.3-free", "2026-08-19", &hours),
+        Some(0.0)
+    );
+    // The colon spelling rides the same rule on a miss.
+    assert!(
+        t.rate_at("minimax/minimax-m3:free", "2026-08-19", 0)
+            .is_some()
+    );
+    // A trailing date stamp does not displace the marker.
+    assert!(
+        t.rate_at("z-ai/glm-5.3-free-20250801", "2026-08-19", 0)
+            .is_some()
+    );
+}
+
+/// A catalog row carrying the free id verbatim always wins over the zero
+/// rule, and a non-free id is untouched by it.
+#[test]
+fn free_variant_row_carried_verbatim_wins() {
+    let t = table(vec![eq_model("z-ai/glm-5.3-free", 1e-6, 2e-6)]);
+    assert_eq!(
+        t.rate_at("z-ai/glm-5.3-free", "2026-08-19", 0)
+            .map(|r| r.input),
+        Some(1e-6),
+        "a catalog row carrying the id verbatim is never shadowed"
+    );
+    assert!(
+        t.rate_at("glm-5.3", "2026-08-19", 0).is_none(),
+        "a non-free miss stays unpriced"
+    );
+    assert!(
+        t.rate_at("free", "2026-08-19", 0).is_none(),
+        "a bare `free` segment is not a variant marker"
     );
 }
 

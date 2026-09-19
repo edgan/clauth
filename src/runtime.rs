@@ -56,7 +56,7 @@
 //! profile has left; [`gc_stale_runtimes`] collects what a crashed session left
 //! behind, of either flavor and in either layout.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -587,7 +587,10 @@ pub(crate) fn has_live_session(name: &ProfileName) -> bool {
 /// session's Claude Code actually reads. That child runs with
 /// `CLAUDE_CONFIG_DIR=<runtime>`, and CC namespaces its Keychain item per config
 /// dir (`Claude Code-credentials-<sha256(dir)[0:8]>`)
-/// while [`crate::keychain`] writes only the UNSUFFIXED `Claude Code-credentials`.
+/// while a rotation's only Keychain write is the UNSUFFIXED
+/// `Claude Code-credentials` mirror (`keychain.rs::keychain_mirror_rotation`); the
+/// namespaced items are written by the session-start seed and the swap
+/// executor, never by a rotation.
 /// So a rotation leaves that CC holding the old refresh token; its own
 /// re-read-and-compare sees its item unchanged and detects no race, and the
 /// `invalid_grant` that follows passes its CAS guard — which also compares
@@ -607,15 +610,18 @@ fn rotation_blocked_by_live_session(has_live_session: bool, is_macos: bool) -> b
     is_macos && has_live_session
 }
 
-/// Whether ANY live `clauth start` session for `name` launched on a credential
-/// that carries a refresh token — the only kind a rotation can strand.
+/// Whether ANY live `clauth start` session that has run on `name` HOLDS a
+/// credential that carries a refresh token — the only kind a rotation can
+/// strand. The holding is read off the row's `launch_store`, which every swap
+/// repoints at the member the session then reads, so the verdict follows the
+/// session's current member, never the one it launched on.
 ///
 /// [`rotation_blocked_by_live_session`] spells out why a live session blocks
 /// rotation on macOS: that session's Claude Code holds the pair in a Keychain
 /// item clauth cannot write, so a rotation leaves it spending a superseded
 /// refresh token, and the `invalid_grant` that follows blanks its item and
 /// signs the session out mid-task. Every step of that mechanism needs a refresh
-/// token to attempt. A session launched on a `session-token.json` sidecar has
+/// token to attempt. A session holding a `session-token.json` sidecar has
 /// none — CLA-SPLIT put it there exactly so sessions hold nothing rotatable —
 /// so there is nothing for it to spend and nothing for a rotation to strand.
 ///
@@ -846,7 +852,29 @@ pub(crate) fn live_bare_sessions() -> Option<usize> {
 /// marker, or a conversation record, and folding them in would have skipped
 /// every one of them on that return.
 pub(crate) fn gc_stale_runtimes() {
-    gc_runtime_trees();
+    // macOS: one shared subprocess budget spans every Keychain item delete the
+    // tree sweep performs below — the daemon-tick shape, not a fresh budget per
+    // pair: a sweep collecting many stale trees must not multiply a stuck
+    // keychain's per-call ceiling across them on the `clauth start` / MCP-boot
+    // paths this runs on. Arm-if-not-armed, so a caller that already armed a
+    // wider one is adopted rather than replaced.
+    #[cfg(target_os = "macos")]
+    let _item_budget = crate::lock::SharedSubprocessBudget::arm(crate::lock::SUBPROCESS_BUDGET);
+    // The Plugin tab's boot probe kills its `clauth mcp` child within 3 s, so
+    // the tree sweep skips there WHOLE: on macOS it spends `security`
+    // subprocesses collecting the removed trees' Keychain items, and on every
+    // platform it takes the state flock per pair against the 25 s deadline a
+    // macOS switch legitimately holds (the same probe-budget rule
+    // `gc_bare_markers`' peek encodes). Gating the TREE half is what keeps
+    // tree and item paired — skipping only the item delete would make the
+    // probe a stranding producer, since the service is a one-way hash of the
+    // dir and no later walk explains an item whose tree the probe removed.
+    // The row/marker/record siblings still run: the split exists precisely so
+    // one sweep's skip is nobody else's. The next real sweep — any start,
+    // resume, TUI launch, mcp serve or daemon startup — collects both halves.
+    if std::env::var_os(crate::mcp::MCP_PROBE_ENV).is_none() {
+        gc_runtime_trees();
+    }
     gc_live_session_rows();
     gc_bare_markers();
     crate::hook_note::gc_conversation_records();
@@ -898,6 +926,68 @@ fn gc_runtime_trees() {
             }
         }
     }
+}
+
+/// Every namespaced Keychain service an EXISTING runtime dir explains — the
+/// live set the macOS census (`keychain::census_namespaced_items`) spares.
+/// Derived through the same naming rule the session seed writes under
+/// (`claude::namespaced_keychain_service`, over the canonicalized dir), from
+/// the same universe the tree sweep walks: every `runtime*` dir under
+/// `profiles/`. A dir the sweep has not collected yet is live here; one it
+/// collects on THIS pass loses its item to the sweep's own collector, and one
+/// it cannot collect keeps both. Sessions dirs and unrelated names contribute
+/// nothing — no CC config dir exists there to derive a service from.
+///
+/// FAIL-CLOSED: an enumeration or canonicalize failure that is not a dir
+/// vanishing mid-walk is an error, and the census reads an underivable live
+/// set as "cannot rule out a live session" — it deletes nothing. An unreadable
+/// root or profile must never shrink the set to empty and hand the census a
+/// delete-everything pass (the same "unknown reads live" rule the sweep's
+/// marker enumeration follows). A dir that vanished between the read and the
+/// canonicalize (`NotFound`) contributes nothing instead: its item is an
+/// orphan and correctly collectible.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production caller is the macOS Keychain census; the derivation is pinned on every platform"
+    )
+)]
+pub(crate) fn live_namespaced_keychain_services() -> Result<BTreeSet<String>> {
+    let mut live = BTreeSet::new();
+    let root = profiles_root_dir()?;
+    let entries = std::fs::read_dir(&root)
+        .with_context(|| format!("cannot enumerate the profiles dir {}", root.display()))?;
+    for profile in entries {
+        let profile =
+            profile.with_context(|| format!("cannot read an entry under {}", root.display()))?;
+        let children = std::fs::read_dir(profile.path())
+            .with_context(|| format!("cannot enumerate {}", profile.path().display()))?;
+        for child in children {
+            let child = child.with_context(|| {
+                format!("cannot read an entry under {}", profile.path().display())
+            })?;
+            let file_name = child.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if !is_runtime_dir_name(name) {
+                continue;
+            }
+            match child.path().canonicalize() {
+                Ok(canonical) => {
+                    live.insert(crate::claude::namespaced_keychain_service(&canonical));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("cannot canonicalize {}", child.path().display())
+                    });
+                }
+            }
+        }
+    }
+    Ok(live)
 }
 
 /// Drop the markers of bare `claude` sessions that have exited — the ordinary
@@ -1011,6 +1101,14 @@ fn gc_one_pair(runtime: &Path, sessions: &Path) -> Result<()> {
         })
         .unwrap_or_else(|| runtime.to_path_buf());
 
+    // macOS: the tree's namespaced Keychain service, derived while the dir
+    // still exists — the derivation canonicalizes it, so it cannot run once
+    // the tree is removed. Collected after the closure below, where a
+    // `security` subprocess is legal; `orphaned_keychain_item` documents why
+    // the dir check sits on the far side of the closure too.
+    #[cfg(target_os = "macos")]
+    let item_service = tree_keychain_service(runtime);
+
     let renamed = with_state_lock(|_held| {
         // An unknown reads as live: this leg runs from the daemon's timer, in a
         // different process, against every profile, and under `LinkMode::Fake`
@@ -1048,10 +1146,97 @@ fn gc_one_pair(runtime: &Path, sessions: &Path) -> Result<()> {
         Ok(false)
     })?;
 
+    // macOS: collect the tree's Keychain item, before the rescue — the delete
+    // is one subprocess, the rescue is a tree-sized copy, and a crash during
+    // the copy must not strand an item whose dir is already gone.
+    #[cfg(target_os = "macos")]
+    if let Some(service) =
+        orphaned_keychain_item(item_service.as_deref(), runtime.symlink_metadata().is_ok())
+    {
+        collect_orphaned_keychain_item(service);
+    }
+
     if renamed {
         rescue_tombstone(&tombstone);
     }
     Ok(())
+}
+
+/// The namespaced Keychain item a collected runtime tree leaves behind, if
+/// any: the tree's derived service when the dir that explains the item is
+/// GONE, `None` when the dir survives or no service was derived. PURE (the
+/// `session_seed_arm` split) so the keep/delete rule is pinned on every
+/// platform; the `security` delete it feeds is macOS-only and unreachable
+/// under `cfg(test)`, where `keychain::enabled()` is false.
+///
+/// The rows, and why each keeps or collects:
+/// - a LIVE pair — the lock's liveness re-check spared it — keeps its dir, so
+///   its item stays: a live session's Claude Code reads that item (CC resolves
+///   the Keychain before any file, namespaced per `CLAUDE_CONFIG_DIR`).
+/// - a pair the sweep could not collect (a failed tombstone rename, an
+///   unreadable tree) keeps its dir, and its item with it.
+/// - a collected pair (the shared tree removed, the isolated tree renamed to
+///   its rescue tombstone) has no dir: its item is orphaned — only that dir's
+///   hash resolved it — and is collected.
+/// - a runtime dir that never existed (the orphaned-marker arm; a crash
+///   between minting the marker dir and building the tree) derived no service,
+///   and no tree ever hosted a session seed to write an item.
+///
+/// The dir check runs AFTER the state-flock closure on purpose: the delete is
+/// a subprocess and must never span the flock, and between the collection and
+/// the delete a session can re-mint the same sid (acquire wipes a stale tree
+/// at its own path and rebuilds), so the check is against the world the
+/// delete will run in — a dir that reappeared reads as live and keeps its
+/// item. The residual window (a re-minted session's whole acquire plus item
+/// seed landing between this check and the delete) is the same post-lock
+/// subprocess window the swap's keychain legs accept.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumer is the macOS stale-runtime GC's Keychain collection; the decision is pinned on every platform"
+    )
+)]
+fn orphaned_keychain_item(service: Option<&str>, dir_exists: bool) -> Option<&str> {
+    service.filter(|_| !dir_exists)
+}
+
+/// macOS: the namespaced Keychain service for a runtime dir the GC is walking,
+/// derived while the dir still exists — the derivation canonicalizes it, so it
+/// cannot run once the tree is removed. `None` when the dir is already gone
+/// (the orphaned-marker arm: no tree was ever built, so no session seed wrote
+/// an item), when it cannot be read, and under `cfg(test)`, where
+/// `keychain::enabled()` is false and no `security` call may run. The probe
+/// never reaches this fn: `gc_stale_runtimes` skips the whole tree sweep under
+/// `MCP_PROBE_ENV`, which is what keeps tree and item paired there.
+#[cfg(target_os = "macos")]
+fn tree_keychain_service(runtime: &Path) -> Option<String> {
+    if !crate::keychain::enabled() {
+        return None;
+    }
+    crate::keychain::keychain_service_for_config_dir(runtime).ok()
+}
+
+/// macOS: delete one orphaned namespaced Keychain item — the collector half of
+/// the m4 LEAVE ruling (2026-09-12: a session's item is
+/// never cleared at teardown, so this sweep is what clears it). Runs after the
+/// state-flock closure (a `security` subprocess must never span it), inside
+/// the shared subprocess budget [`gc_stale_runtimes`] arms, and is
+/// loud-not-fatal: the item is inert without its dir, so a failed delete
+/// leaves stale clutter rather than breaking anything.
+#[cfg(target_os = "macos")]
+fn collect_orphaned_keychain_item(service: &str) {
+    match crate::keychain::delete_namespaced_item(service) {
+        Ok(()) => logline!(
+            "clauth: collected the orphaned per-session Keychain item {service} (its runtime tree \
+             is gone)"
+        ),
+        Err(e) => logline!(
+            "clauth: collecting the orphaned per-session Keychain item {service} failed: {e:#}. It \
+             holds a login only the removed tree's dir resolved, so it stays inert in the Keychain \
+             until a later sweep removes a tree at the same path"
+        ),
+    }
 }
 
 /// Every profile's SHARED runtime dirs: each live session's `runtime-<sid>` plus
@@ -1255,6 +1440,10 @@ pub(crate) struct RotationGuard {
 ///   `oauth::apply_rotated_tokens_locked` runs its mirror AFTER the closure ends,
 ///   where nothing clamps it. Kept in the sum on every host, for the reason stated
 ///   at the constant.
+/// - [`SESSION_SEED_BUDGET`] — a macOS `clauth start` seeds the session's
+///   per-config-dir Keychain item under this same lock (past the state flock,
+///   before the guard drops), spending one shared budget across the carry and
+///   the write. Same non-waste reasoning off macOS as the mirror term.
 ///
 /// Everything else a healthy holder does is sub-millisecond disk work ON LINUX,
 /// which is [`crate::lock::state_lock_timeout`]'s own qualification of the same
@@ -1278,13 +1467,19 @@ pub(crate) struct RotationGuard {
 /// `saturating_add` over `as_secs()` arithmetic: both terms are whole seconds
 /// today, and a sub-second one added later would round DOWN through `as_secs`,
 /// quietly shortening the deadline it was meant to lengthen.
-pub(crate) const ROTATION_LOCK_TIMEOUT: Duration =
-    crate::oauth::TOKEN_HTTP_DEADLINES.saturating_add(KEYCHAIN_MIRROR_BUDGET);
+pub(crate) const ROTATION_LOCK_TIMEOUT: Duration = crate::oauth::TOKEN_HTTP_DEADLINES
+    .saturating_add(KEYCHAIN_MIRROR_BUDGET)
+    .saturating_add(SESSION_SEED_BUDGET);
 
-/// What a macOS rotation's Keychain mirror may spend under the rotation lock: two
-/// `security` invocations at `keychain::SECURITY_TIMEOUT` each, unclamped because
-/// `oauth::apply_rotated_tokens_locked` runs the mirror after its state-flock
-/// closure ends.
+/// What a macOS rotation's Keychain mirror is budgeted for under the rotation
+/// lock: two `security` invocations at `keychain::SECURITY_TIMEOUT` each,
+/// unclamped because `oauth::apply_rotated_tokens_locked` runs the mirror after
+/// its state-flock closure ends. The mirror makes THREE invocations since the
+/// write's read-back verify landed — the third rides past this budget
+/// deliberately (an unverifiable write completes rather than failing, so the
+/// under-cover costs a lock-waiter's margin, never a correct rotation, and a
+/// false [`ROTATION_LOCK_TIMEOUT`] firing is a named retry, never a fault);
+/// `keychain::SECURITY_TIMEOUT`'s doc carries the derivation.
 ///
 /// Spelled here rather than read out of `keychain`, which is macOS-gated while
 /// this deadline is one number on every host. Off macOS the term is not waste: it
@@ -1293,6 +1488,27 @@ pub(crate) const ROTATION_LOCK_TIMEOUT: Duration =
 /// the other side of the derivation as a `const` assertion, so a re-tune of
 /// `SECURITY_TIMEOUT` fails to COMPILE on the platform that has one.
 pub(crate) const KEYCHAIN_MIRROR_BUDGET: Duration = Duration::from_secs(20);
+
+/// What the macOS session-start Keychain seed is budgeted for under the
+/// rotation lock: one [`crate::lock::SharedSubprocessBudget`] of this size
+/// spanning the carry and the item write together, so a stuck keychain
+/// (an unanswered ACL dialog, a locked keychain) cannot spend more than this
+/// before the legs start refusing rather than hanging. Four `security`
+/// invocations worst case (carry read, merge read, put, verify), each capped
+/// by `keychain::SECURITY_TIMEOUT`; the shared budget is the aggregate bound
+/// the per-call cap cannot supply, the same discipline
+/// [`KEYCHAIN_MIRROR_BUDGET`] holds the rotation mirror to.
+///
+/// Spelled here rather than read out of `keychain`, same reason as
+/// [`KEYCHAIN_MIRROR_BUDGET`]: the deadline derivation is one number on every
+/// host. Off macOS the term is not waste — it is headroom for the seed leg
+/// the same way the mirror budget is.
+///
+/// In AGGREGATE a healthy holder spends ~none of it (13-29 ms per
+/// `security` call, measured in `keychain.rs`); the budget only ever binds on
+/// a stuck keychain, where the alternative is an unbounded hold under the
+/// rotation guard.
+pub(crate) const SESSION_SEED_BUDGET: Duration = Duration::from_secs(20);
 
 /// The rotation-lock deadline a session start waits out: [`ROTATION_LOCK_TIMEOUT`],
 /// or a shorter value a test poses a wedge under. The one source of the deadline
@@ -1507,20 +1723,16 @@ pub(crate) fn open_pid_file(path: &Path) -> std::io::Result<File> {
     crate::profile::open_state_file(path)
 }
 
-/// Why this host cannot execute a per-session credential swap at all. Both arms
-/// are structural rather than unfinished work, and both must REFUSE loudly: a
-/// swap that silently leaves the session on its launch account is the one outcome
-/// the live-Claude-Code probe exists to prevent.
+/// Why this host cannot execute a per-session credential swap. The arm is
+/// structural rather than unfinished work, and must REFUSE loudly: a swap that
+/// silently leaves the session on its launch account is the one outcome the
+/// live-Claude-Code probe exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwapUnsupported {
     /// [`LinkMode::Fake`] shares ONE runtime tree across every SHARED session of
     /// the profile, so repointing its credential file would move every such
     /// session at once.
     SharedRuntimeTree,
-    /// macOS resolves credentials Keychain-FIRST and deletes the plaintext file
-    /// once it has migrated them, so a swapped-in file is inert until the
-    /// per-`CLAUDE_CONFIG_DIR` Keychain item is written alongside it.
-    KeychainFirst,
 }
 
 impl std::fmt::Display for SwapUnsupported {
@@ -1529,19 +1741,14 @@ impl std::fmt::Display for SwapUnsupported {
             Self::SharedRuntimeTree => {
                 f.write_str("this host shares one runtime tree across the profile's sessions")
             }
-            Self::KeychainFirst => f.write_str("this host resolves credentials keychain-first"),
         }
     }
 }
 
-/// The transport/platform gate, kept PURE so both refusals are exercised from a
-/// Linux test run — reading `cfg!(target_os = "macos")` is the caller's job.
-fn swap_support(mode: LinkMode, is_macos: bool) -> Result<(), SwapUnsupported> {
+/// The transport gate, kept PURE so the refusal is exercised from any test run.
+fn swap_support(mode: LinkMode) -> Result<(), SwapUnsupported> {
     if mode == LinkMode::Fake {
         return Err(SwapUnsupported::SharedRuntimeTree);
-    }
-    if is_macos {
-        return Err(SwapUnsupported::KeychainFirst);
     }
     Ok(())
 }
@@ -1557,27 +1764,8 @@ fn swap_support(mode: LinkMode, is_macos: bool) -> Result<(), SwapUnsupported> {
 /// row — so this is where the two are kept consistent. The USER-facing refusal is
 /// `start::run`'s, before a tree is built or `claude` is spawned; this is the
 /// floor under it, not a substitute for it.
-fn chain_opt_in_survives(
-    requested: bool,
-    isolation: Isolation,
-    mode: LinkMode,
-    is_macos: bool,
-) -> bool {
-    requested && isolation == Isolation::Shared && swap_support(mode, is_macos).is_ok()
-}
-
-/// [`swap_support`]'s PLATFORM arm alone, answerable with no disk: the mode is
-/// pinned to the supported transport, so only `is_macos` can fire. `start::run`
-/// asks this before anything fallible, because a verdict fixed at compile time
-/// must not reach the user as a state-lock timeout or an IO error from a probe it
-/// never needed.
-///
-/// Deliberate consequence: on a macOS host that ALSO runs [`LinkMode::Fake`] the
-/// user hears the keychain cause rather than the shared-tree one, inverting
-/// `swap_support`'s own arm precedence. Both arms are unfixable dead ends and the
-/// executor's arm order is untouched, so this only picks which of the two is named.
-pub(crate) fn unsupported_swap_platform(is_macos: bool) -> Option<SwapUnsupported> {
-    swap_support(LinkMode::Real, is_macos).err()
+fn chain_opt_in_survives(requested: bool, isolation: Isolation, mode: LinkMode) -> bool {
+    requested && isolation == Isolation::Shared && swap_support(mode).is_ok()
 }
 
 /// [`swap_support`]'s TRANSPORT arm, which is only knowable by probing. Run LAST
@@ -1587,8 +1775,7 @@ pub(crate) fn unsupported_swap_platform(is_macos: bool) -> Option<SwapUnsupporte
 ///
 /// Probes the profile dir exactly as [`ProfileRuntime::acquire`] does, under the
 /// same state lock, so two concurrent starts cannot interleave their probe
-/// dotfiles and read a spurious [`LinkMode::Fake`]. `is_macos` is pinned false
-/// because [`unsupported_swap_platform`] already owns that arm.
+/// dotfiles and read a spurious [`LinkMode::Fake`].
 ///
 /// `Ok(None)` is the supported host. An IO failure propagates rather than reading
 /// as either answer — a probe that could not run says nothing about the host.
@@ -1599,7 +1786,7 @@ pub(crate) fn unsupported_swap_transport(name: &ProfileName) -> Result<Option<Sw
             .with_context(|| format!("failed to create {}", profile_root.display()))?;
         detect_link_mode(&profile_root)
     })?;
-    Ok(swap_support(mode, false).err())
+    Ok(swap_support(mode).err())
 }
 
 /// Why a swap onto a named member did not happen. A VALUE rather than an error:
@@ -1815,11 +2002,10 @@ fn touch_store(plan: &SwapPlan, memoized: Option<SystemTime>) -> Result<()> {
 static COARSE_MTIME_OVERRIDE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// Gated with its caller: the one test that poses a truncating filesystem drives
-// `swap_to`, refused at platform level on macOS, so an ungated setter there is a
-// dead-code error under clippy `-D warnings`. The static stays ungated —
-// `as_stored` reads it on every platform.
-#[cfg(all(test, not(target_os = "macos")))]
+// Gated with its caller: the one test that poses a truncating filesystem
+// drives `swap_to`, whose mtime-touch legs need the override. The static stays
+// ungated — `as_stored` reads it on every platform.
+#[cfg(test)]
 fn set_coarse_mtime_override(on: bool) {
     COARSE_MTIME_OVERRIDE.store(on, std::sync::atomic::Ordering::SeqCst);
 }
@@ -2144,7 +2330,7 @@ impl SessionSwap {
         if self.shutdown.is_begun() {
             return Err(SwapRefused::ShuttingDown);
         }
-        swap_support(self.mode, cfg!(target_os = "macos")).map_err(SwapRefused::Unsupported)?;
+        swap_support(self.mode).map_err(SwapRefused::Unsupported)?;
         // `--isolated` and fallback-following are mutually exclusive (a throwaway
         // tree versus swappable managed credentials). Enforced at the executor
         // because it is the one chokepoint every caller goes through, rather than
@@ -2229,8 +2415,17 @@ impl SessionSwap {
         };
         let _rotation = RotationGuard::acquire(&plan.member)?;
         let link = self.runtime.join(".credentials.json");
-        with_state_lock(|_held| {
+        // The install source of the member being LEFT — what the macOS
+        // carry-back below writes the session's Keychain pair into. Captured
+        // inside the hold, spent after it (the carry's read is a subprocess).
+        #[cfg(target_os = "macos")]
+        let mut previous_store: Option<std::path::PathBuf> = None;
+        let outcome = with_state_lock(|_held| {
             let current = self.canonical();
+            #[cfg(target_os = "macos")]
+            {
+                previous_store = Some(current.clone());
+            }
             // DRAIN. A Claude Code re-login sitting in the runtime file belongs to
             // the member the link STILL resolves to; once canonical moves, the
             // next tick would write those bytes into the new member's store and
@@ -2267,6 +2462,16 @@ impl SessionSwap {
                 crate::live_sessions::update_as_session(self.session.as_str(), |fields| {
                     fields.set_current_member(plan.member.as_str());
                     fields.set_last_swap_at(crate::usage::now_ms());
+                    // Off macOS the link this hold just moved IS what the
+                    // session reads, so the row's rotation verdict follows it
+                    // here. macOS defers this write to past the keychain legs
+                    // below: the session's Claude Code resolves the item
+                    // first, so until those legs land it is still holding the
+                    // outgoing member's pair, and a row already naming the
+                    // incoming store would exempt a rotation of the member it
+                    // is still reading.
+                    #[cfg(not(target_os = "macos"))]
+                    fields.set_launch_store(plan.store.clone());
                 })
             {
                 logline!(
@@ -2276,7 +2481,127 @@ impl SessionSwap {
                 );
             }
             Ok(SwapOutcome::Swapped)
-        })
+        })?;
+        // macOS: the session's Claude Code reads the NAMESPACED Keychain item
+        // for this runtime dir (it sets `CLAUDE_CONFIG_DIR`, and CC resolves
+        // the Keychain first), so the link repoint above moved only the file
+        // layer. CARRY, then WRITE — or, when the incoming member's store is
+        // refreshless, SIGN OUT (see [`swap_item_arm`]) — in that order, and
+        // the second leg only runs if the carry could: the item holds the
+        // outgoing member's only live pair
+        // once CC has refreshed there (it deletes the runtime file on
+        // migration), so writing before carrying would brick that member, and
+        // skipping both on a failed carry leaves an inert swap — the session
+        // keeps its previous credentials — rather than a destroyed chain. Both
+        // legs run AFTER the flock (a `security` subprocess must never span
+        // it); loud-not-fatal, idempotent, and only a later swap onto ANOTHER
+        // member re-runs them (the executor refuses `AlreadyCurrent`).
+        //
+        // The row's `launch_store` repoint rides the same ordering: until a leg
+        // succeeds the session is still reading the outgoing member's pair out
+        // of the item, so the row keeps naming that member's store and the
+        // rotation verdict keeps refusing for it — the fail-closed direction.
+        // No leg runs in a cfg(test) build (`keychain::enabled()` is false
+        // there), so the file layer is the whole truth and the row follows the
+        // link immediately, exactly as it does off macOS inside the hold.
+        #[cfg(target_os = "macos")]
+        if matches!(outcome, SwapOutcome::Swapped) && !crate::keychain::enabled() {
+            self.repoint_row_store(&plan);
+        }
+        #[cfg(target_os = "macos")]
+        if matches!(outcome, SwapOutcome::Swapped) && crate::keychain::enabled() {
+            let carried = previous_store
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("the outgoing member's install source is unknown"))
+                .and_then(|store| crate::claude::carry_session_item_into(store, &self.runtime));
+            match carried {
+                Ok(()) => {
+                    // The refreshless skip the start site carries, at the one
+                    // site where the item already exists: a rolling sidecar or
+                    // static mint swapped in mid-session must never be
+                    // INSTALLED into the item (CC would read that snapshot
+                    // forever and never return to the file the re-stamp leg
+                    // writes), and the outgoing member's login it still holds
+                    // must go too, or CC keeps serving the member the chain
+                    // just moved the session off of. Sign-out does both.
+                    match swap_item_arm(
+                        crate::profile::read_json_file::<crate::profile::ClaudeCredentials>(
+                            &plan.store,
+                        )
+                        .ok()
+                        .as_ref(),
+                    ) {
+                        SwapItemArm::Install => {
+                            match crate::claude::keychain_mirror_source_for_config_dir(
+                                &plan.store,
+                                &self.runtime,
+                            ) {
+                                // The item now holds the incoming member's pair,
+                                // so that is what the session reads: the row's
+                                // verdict follows.
+                                Ok(()) => self.repoint_row_store(&plan),
+                                Err(e) => logline!(
+                                    "clauth: session {} swapped onto {} but writing its per-session \
+                                     Keychain item failed: {e:#}. The session keeps authenticating as its \
+                                     previous member; only a later swap onto another member re-runs the \
+                                     write",
+                                    self.session.as_str(),
+                                    plan.member
+                                ),
+                            }
+                        }
+                        SwapItemArm::SignOut => {
+                            match crate::keychain::keychain_sign_out_for_config_dir(&self.runtime) {
+                                // The item holds nothing now, so the session
+                                // falls back to the file layer this swap moved:
+                                // the row's verdict follows.
+                                Ok(()) => self.repoint_row_store(&plan),
+                                Err(e) => logline!(
+                                    "clauth: session {} swapped onto {} but signing its per-session \
+                                     Keychain item out failed: {e:#}. The session keeps authenticating as \
+                                     its previous member, so the file layer this swap moved is not what \
+                                     its Claude Code reads; only a later swap onto another member re-runs \
+                                     it",
+                                    self.session.as_str(),
+                                    plan.member
+                                ),
+                            }
+                        }
+                    }
+                }
+                Err(e) => logline!(
+                    "clauth: session {} swapped onto {} but carrying the previous member's \
+                     Keychain pair back into its store failed: {e:#}. The per-session Keychain \
+                     item was left untouched, so the session keeps authenticating as its \
+                     previous member; only a later swap onto another member re-runs both legs",
+                    self.session.as_str(),
+                    plan.member
+                ),
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Point the row's rotation verdict at the store the plan repointed the
+    /// link at. macOS only, and always AFTER the state flock (each call site
+    /// holds no lock, so `update_as_session` takes a FIRST-LEVEL acquisition
+    /// there, not a reentry): the write loads a fresh row inside that hold, so
+    /// it cannot revert a daemon-owned field, and a failed write leaves the row
+    /// naming the outgoing member's store — rotations stay refused for the
+    /// member the session may still be reading, never exempted for one it is
+    /// not.
+    #[cfg(target_os = "macos")]
+    fn repoint_row_store(&self, plan: &SwapPlan) {
+        if let Err(e) = crate::live_sessions::update_as_session(self.session.as_str(), |fields| {
+            fields.set_launch_store(plan.store.clone())
+        }) {
+            logline!(
+                "clauth: session {} swapped onto {} but its row's store did not follow: {e:#}. \
+                 Rotations stay refused for the member it left",
+                self.session.as_str(),
+                plan.member
+            );
+        }
     }
 
     /// Release and unlink everything the swaps stamped. Called from `Drop`'s
@@ -2657,8 +2982,7 @@ impl ProfileRuntime {
             // failure is reported and stepped over — the session itself is
             // already sound, and failing here would trade a missing row for a
             // dead session.
-            let opt_in =
-                chain_opt_in_survives(follows_chain, isolation, mode, cfg!(target_os = "macos"));
+            let opt_in = chain_opt_in_survives(follows_chain, isolation, mode);
             // A clamp here means the opt-in asked for something this host's probed
             // mode cannot support, so the session runs without the chain its caller
             // asked for — the silent non-switch the flag exists to prevent. Say so
@@ -2676,13 +3000,11 @@ impl ProfileRuntime {
                 opt_in,
                 // The SAME value the runtime tree is built from below, so the
                 // row cannot disagree with what this session actually reads —
-                // on macOS, which is the only place it is consulted. The
-                // stronger "never" would need `swap_to` to update it when it
-                // moves `cell.canonical`, and it deliberately does not: swaps
-                // refuse macOS (`swap_support`), and macOS is where
-                // `live_session_holds_rotatable` reads this. A platform that
-                // gains both swaps and the rotation refusal inherits that
-                // update as a prerequisite.
+                // on macOS, which is the only place it is consulted. Every
+                // later swap repoints it at the member the session lands on
+                // (`swap_to`'s row update; on macOS that waits for the
+                // keychain legs), so `live_session_holds_rotatable` reads the
+                // store of the member the session is ON, never the launch one.
                 Some(canonical.clone()),
             );
             if let Err(e) = crate::live_sessions::register(&row) {
@@ -2691,9 +3013,16 @@ impl ProfileRuntime {
             stamp_window_closing(&paths, &session);
             Ok::<_, anyhow::Error>((session, paths, file, legacy_lock, mode, fresh))
         })?;
+        // macOS: the Keychain half of the tree build. Before the guard drops,
+        // so a rotation queued behind it cannot land between the build and the
+        // item write — see `seed_session_keychain_item`.
+        #[cfg(target_os = "macos")]
+        seed_session_keychain_item(&canonical, &paths.runtime, name, &session);
         // Released at the end of the register-and-stamp window rather than at the
         // end of this function, so a queued peer waits out that window and not the
-        // watchdog arming behind it.
+        // watchdog arming behind it. On macOS the guard additionally spans
+        // `seed_session_keychain_item`'s `security` subprocesses, which sit past
+        // the state flock on purpose (a subprocess must never span it).
         //
         // What the hold must still cover, and does: the credential
         // materialization inside `build_runtime_dir_with_active_env` (which
@@ -2859,7 +3188,7 @@ impl ProfileRuntime {
     /// This session's swap executor. Production reaches it through the watchdog
     /// thread's own clone; this accessor exists so a test can drive one leg at a
     /// time instead of racing a 1 Hz tick.
-    #[cfg(all(test, not(target_os = "macos")))]
+    #[cfg(test)]
     fn swap(&self) -> &SessionSwap {
         &self.swap
     }
@@ -3586,6 +3915,234 @@ fn materialize_entries(pending: Vec<(PathBuf, PathBuf)>, mode: LinkMode) -> Resu
     match first_err.into_inner().unwrap_or_else(|p| p.into_inner()) {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// macOS: seed the NAMESPACED Keychain item a session's Claude Code reads
+/// (it sets `CLAUDE_CONFIG_DIR`, and CC resolves the Keychain before any
+/// file), from the same install source the runtime tree was just built
+/// from — the Keychain half of [`reconcile_credentials`]' file half.
+///
+/// Without a pre-written item, a session on a refreshable login falls
+/// through to the runtime file, migrates into the item on its first token
+/// write and DELETES that file: the store never advances, its refresh token
+/// goes stale, and the next clauth-side rotation dies into quarantine
+/// (reproduced end-to-end on-device 2026-09-11). A
+/// pre-written item means CC reads clauth's pair from its first request and
+/// the runtime file keeps feeding the drain.
+///
+/// REFRESHLESS install sources skip both legs: a rolling sidecar or a
+/// static setup-token mint never refreshes, so CC never migrates it and the
+/// file layer stays authoritative for the session's whole life — writing
+/// the item anyway would strand the session on a snapshot the re-stamp leg
+/// can no longer reach, because CC does not go back to the file once the
+/// item exists.
+///
+/// An ABSENT install source signs the item out instead of carrying: the
+/// carry would resurrect a departed OAuth store out of a stale item (an
+/// endpoint recapture's leftover), and the session's CC must not keep
+/// serving that login — the same split the bare-item mirror makes
+/// (`keychain_mirror_source`'s `AbsentSource::SignOut`).
+///
+/// CARRY, then WRITE — the same pair and order as `swap_to`: the item may
+/// already hold a login (a live sibling on the shared fake-mode tree, or a
+/// previous session's orphaned item under a recycled sid), and writing first
+/// would destroy it. The carry adopts any item whose login expires later
+/// than the store's — a recycled dir's orphaned item holds whatever member a
+/// PREVIOUS session ended on (mid-session swaps repoint that same item), and
+/// ownership cannot be proven, since no real blob carries a top-level
+/// account anchor — and a tie keeps the store; otherwise the write that
+/// follows replaces the orphaned login.
+///
+/// BUDGET: one [`SharedSubprocessBudget`] of [`SESSION_SEED_BUDGET`] spans
+/// both legs, so a stuck keychain cannot spend more than that under the
+/// rotation guard the caller still holds — the same discipline
+/// [`KEYCHAIN_MIRROR_BUDGET`] holds the mirror to, re-derived into
+/// [`ROTATION_LOCK_TIMEOUT`] so the start queued behind this one still waits
+/// it out rather than false-refusing. The carry's own state flock adopts the
+/// armed budget ([`crate::lock::SharedSubprocessBudget`] arm-if-not-armed),
+/// so nothing nested re-arms it.
+///
+/// Runs AFTER the state flock (a `security` subprocess must never span it)
+/// while the caller still holds the rotation guard: the session's marker and
+/// registry row are stamped by then, so on macOS no rotation of a refreshable
+/// chain can start past this point, and the guard keeps a rotation that
+/// queued during the tree build from spending the refresh token between the
+/// build and the item write that installs it.
+///
+/// Loud-not-fatal on every arm: a failed write leaves the session on the
+/// file layer — the pre-fix behavior — and a headless box whose keychain
+/// refuses must still start sessions. Nothing retries the write for THIS
+/// session; the next start on the same tree, or a later swap onto another
+/// member, re-runs it.
+/// Which Keychain arm a session start takes, derived from the install source
+/// alone. PURE so the arm selection is pinned on every platform: the seeding
+/// itself is macOS-only and unreachable by `cfg(test)` (`keychain::enabled()`
+/// is false there), the same split the mirror sites record.
+///
+/// - absent install source → [`SessionSeedArm::SignOut`]: the carry would
+///   resurrect a departed OAuth store out of a stale item (an endpoint
+///   recapture's leftover), so the session's item must stop serving whatever
+///   login it holds.
+/// - unparseable store → [`SessionSeedArm::Carry`]: a torn read is not
+///   evidence of refreshlessness, and the legs that follow fail loudly on
+///   the bytes rather than silently skipping (`checked_store_at` refuses a
+///   non-login; the carry reads a torn store as holding no expiry, which the
+///   item's login beats and adopts).
+/// - refreshless store (no refresh token — a rolling sidecar, a static
+///   setup-token mint) → [`SessionSeedArm::Skip`]: CC never migrates those,
+///   so the file layer must stay authoritative for the session's whole life;
+///   writing the item anyway would strand the session on a snapshot the
+///   re-stamp leg can no longer reach, because CC does not go back to the
+///   file once the item exists.
+/// - otherwise → [`SessionSeedArm::Carry`]: carry the item's fresher pair
+///   back into the store, then write the item from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumer is the macOS session-start Keychain seed; the arm selection is pinned on every platform"
+    )
+)]
+enum SessionSeedArm {
+    SignOut,
+    Skip,
+    Carry,
+}
+
+/// See [`SessionSeedArm`]. `store` is the install source's parsed contents
+/// when it both exists and parses; `None` covers absent and unparseable
+/// alike, which take different arms only on the `exists` bit the caller
+/// already holds.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumer is the macOS session-start Keychain seed; the arm selection is pinned on every platform"
+    )
+)]
+fn session_seed_arm(
+    canonical_exists: bool,
+    store: Option<&crate::profile::ClaudeCredentials>,
+) -> SessionSeedArm {
+    if !canonical_exists {
+        return SessionSeedArm::SignOut;
+    }
+    match store {
+        None => SessionSeedArm::Carry,
+        Some(creds) if creds.refresh_token().is_none() => SessionSeedArm::Skip,
+        Some(_) => SessionSeedArm::Carry,
+    }
+}
+
+/// Which Keychain arm the swap executor's item-write takes for the member being
+/// swapped ONTO, derived from that member's install source alone. PURE so the
+/// arm selection is pinned on every platform: the write itself is macOS-only
+/// and unreachable by `cfg(test)` (`keychain::enabled()` is false there), the
+/// same split [`SessionSeedArm`] records — this is the swap-site twin of the
+/// start site's refreshless arm.
+///
+/// - refreshless store (no refresh token — a rolling sidecar, a static
+///   setup-token mint) → [`SwapItemArm::SignOut`]: CC never migrates those
+///   into an item, so the file layer must stay authoritative for the re-stamp
+///   leg to reach the session. The action is a sign-out rather than the start
+///   site's bare skip because the swap's item already EXISTS and holds the
+///   OUTGOING member's login — merely skipping the write would leave the
+///   session authenticating as the member the chain just moved it off of (CC
+///   resolves the Keychain first), an inert swap; signing the login out (the
+///   same tool the seed's absent-source arm uses to make an item stop serving
+///   what it holds) is what drops CC back onto the file.
+/// - otherwise → [`SwapItemArm::Install`]: install the incoming store into the
+///   item after the carry-back. An unparseable read lands here too: a torn
+///   read is not evidence of refreshlessness, and the install leg that follows
+///   fails loudly on the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumer is the macOS swap executor's Keychain item-write; the arm selection is pinned on every platform"
+    )
+)]
+enum SwapItemArm {
+    Install,
+    SignOut,
+}
+
+/// See [`SwapItemArm`]. `store` is the incoming member's install source parsed;
+/// `None` (absent or unparseable) takes [`SwapItemArm::Install`], never a skip.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumer is the macOS swap executor's Keychain item-write; the arm selection is pinned on every platform"
+    )
+)]
+fn swap_item_arm(store: Option<&crate::profile::ClaudeCredentials>) -> SwapItemArm {
+    match store {
+        Some(creds) if creds.refresh_token().is_none() => SwapItemArm::SignOut,
+        _ => SwapItemArm::Install,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn seed_session_keychain_item(
+    canonical: &Path,
+    runtime: &Path,
+    name: &ProfileName,
+    session: &SessionId,
+) {
+    if !crate::keychain::enabled() {
+        return;
+    }
+    let arm = session_seed_arm(
+        canonical.exists(),
+        crate::profile::read_json_file::<crate::profile::ClaudeCredentials>(canonical)
+            .ok()
+            .as_ref(),
+    );
+    match arm {
+        SessionSeedArm::SignOut => {
+            if let Err(e) = crate::keychain::keychain_sign_out_for_config_dir(runtime) {
+                logline!(
+                    "clauth: session {} started on {}, which stores no Claude login, but signing \
+                     its per-session Keychain item out failed: {e:#}. The session's Claude Code may \
+                     keep serving whatever login that item still holds",
+                    session.as_str(),
+                    name
+                );
+            }
+        }
+        SessionSeedArm::Skip => {}
+        SessionSeedArm::Carry => {
+            let _budget = crate::lock::SharedSubprocessBudget::arm(SESSION_SEED_BUDGET);
+            match crate::claude::carry_session_item_into(canonical, runtime) {
+                Ok(()) => {
+                    if let Err(e) =
+                        crate::claude::keychain_mirror_source_for_config_dir(canonical, runtime)
+                    {
+                        logline!(
+                            "clauth: session {} started on {} but writing its per-session \
+                             Keychain item failed: {e:#}. Its Claude Code falls back to the runtime \
+                             credentials file, where its next token refresh migrates into the item \
+                             and strands the stored refresh token; the next start on this tree \
+                             re-runs the write",
+                            session.as_str(),
+                            name
+                        );
+                    }
+                }
+                Err(e) => logline!(
+                    "clauth: session {} started on {} but carrying its per-session Keychain item's \
+                     pair back into the store failed: {e:#}. The item was left untouched, so the \
+                     session's Claude Code reads whatever login it holds and falls back to the \
+                     runtime credentials file when it holds none",
+                    session.as_str(),
+                    name
+                ),
+            }
+        }
     }
 }
 

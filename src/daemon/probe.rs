@@ -32,11 +32,23 @@ use crate::profile::clauth_dir;
 
 /// How stale `status.json` may be before the `● daemon` dot flips green→amber.
 /// The daemon stamps it every ~1s loop tick, but a single tick can legitimately
-/// block up to the keychain shell-outs' 20s total kill deadline (a
-/// read-modify-write at 10s each), so the window rides just above that. It also lands at the daemon's tightened
-/// [`WATCHDOG_DEADLINE`](super::WATCHDOG_DEADLINE), so amber reads as "wedging,
-/// about to be aborted + restarted" rather than a transient slow tick.
-const DAEMON_STALE_MS: u64 = 30_000;
+/// block on the keychain shell-outs: a rotation's mirror makes three `security`
+/// calls (read, write, read-back verify) at 10 s each, unclamped because it
+/// runs after the lock closure — 30 s worst, past
+/// `runtime::KEYCHAIN_MIRROR_BUDGET`'s 20 s term by design (see
+/// `keychain::SECURITY_TIMEOUT`'s doc). The window therefore sits one margin
+/// ABOVE [`WATCHDOG_DEADLINE`](super::WATCHDOG_DEADLINE), so that worst legal
+/// tick reads green throughout and amber means "no tick has completed within
+/// what the watchdog tolerates" — wedging, pre-abort — never "slowest legal
+/// tick".
+const DAEMON_STALE_MS: u64 = super::WATCHDOG_DEADLINE.as_millis() as u64 + 5_000;
+
+const _: () = assert!(
+    DAEMON_STALE_MS > super::WATCHDOG_DEADLINE.as_millis() as u64,
+    "the staleness window must sit strictly above the watchdog deadline: the \
+     worst legal tick (a keychain mirror spending every security deadline) must \
+     read green, never amber"
+);
 
 /// The `● daemon` header dot's three display states, derived from the daemon
 /// singleton flock (presence) + the `generated_at` stamp inside `status.json`

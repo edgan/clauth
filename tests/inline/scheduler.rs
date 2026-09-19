@@ -50,6 +50,7 @@ fn oauth_profile_disabled(name: &str, disabled: bool) -> crate::profile::Profile
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     p.disabled = disabled;
@@ -1218,6 +1219,7 @@ fn bootstrap_legs_keep_separate_stamps_for_a_hybrid_profile() {
     );
     super::bootstrap_third_party(
         &tp_store,
+        &store,
         &tp_status,
         &last_fetched,
         &[tp_entry("hybrid")],
@@ -4967,6 +4969,150 @@ fn fetch_third_party_due_inserts_known_auth_expired() {
     assert!(crate::profile_cache::auth_expired_matches(&name, fp));
 }
 
+// --- wallet_history.jsonl: the balance series the wallet-burn rate replays ---
+
+fn wallet_stats(values: &[(&str, &str)]) -> crate::providers::ThirdPartyStats {
+    crate::providers::ThirdPartyStats {
+        is_available: true,
+        rows: values
+            .iter()
+            .map(|&(label, value)| crate::providers::StatRow {
+                label: label.to_string(),
+                value: value.to_string(),
+                kind: crate::providers::StatRowKind::Body,
+            })
+            .collect(),
+        bars: vec![],
+        plan: None,
+        endpoint: None,
+        best_effort: false,
+    }
+}
+
+fn stub_wallet_stats(
+    _: &crate::providers::ThirdPartyTarget,
+    _: &str,
+    _: Option<&str>,
+) -> Result<crate::providers::ThirdPartyStats, crate::providers::ThirdPartyError> {
+    Ok(wallet_stats(&[("api balance", "18.89 CNY")]))
+}
+
+#[test]
+fn wallet_series_records_first_reading_then_bridge_on_change() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let name = crate::profile::ProfileName::from("ds-series");
+    let t0 = 1_700_000_000_000u64;
+    crate::profile::append_wallet_readings_at(
+        &name,
+        &wallet_stats(&[("api balance", "10.00 CNY")]),
+        t0,
+    );
+    assert_eq!(
+        crate::profile::load_wallet_history(&name),
+        vec![crate::usage::WalletSample {
+            ts: t0,
+            label: "api balance".to_string(),
+            amount: 10.0,
+            currency: "CNY".to_string(),
+        }]
+    );
+    // Unchanged reading: nothing appended.
+    crate::profile::append_wallet_readings_at(
+        &name,
+        &wallet_stats(&[("api balance", "10.00 CNY")]),
+        t0 + 90_000,
+    );
+    assert_eq!(crate::profile::load_wallet_history(&name).len(), 1);
+    // Changed reading: bridge (prev amount 1 ms earlier) + the new one.
+    crate::profile::append_wallet_readings_at(
+        &name,
+        &wallet_stats(&[("api balance", "8.00 CNY")]),
+        t0 + 180_000,
+    );
+    let series = crate::profile::load_wallet_history(&name);
+    assert_eq!(series.len(), 3, "{series:?}");
+    assert_eq!((series[1].ts, series[1].amount), (t0 + 179_999, 10.0));
+    assert_eq!((series[2].ts, series[2].amount), (t0 + 180_000, 8.0));
+}
+
+#[test]
+fn wallet_series_keeps_each_wallets_readings_separate() {
+    // DS5/DS6 shape: an unfunded USD wallet listed before the funded CNY one,
+    // both under the SAME row label — a wallet's identity is (label, currency).
+    let _home = crate::testutil::HomeSandbox::new();
+    let name = crate::profile::ProfileName::from("ds-two");
+    let t0 = 1_700_000_000_000u64;
+    let both = wallet_stats(&[("api balance", "0.00 USD"), ("api balance", "63.34 CNY")]);
+    crate::profile::append_wallet_readings_at(&name, &both, t0);
+    assert_eq!(crate::profile::load_wallet_history(&name).len(), 2);
+    // Only the CNY wallet moves: the USD wallet records nothing new.
+    let drifted = wallet_stats(&[("api balance", "0.00 USD"), ("api balance", "60.14 CNY")]);
+    crate::profile::append_wallet_readings_at(&name, &drifted, t0 + 90_000);
+    let series = crate::profile::load_wallet_history(&name);
+    let usd: Vec<&crate::usage::WalletSample> =
+        series.iter().filter(|s| s.currency == "USD").collect();
+    let cny: Vec<&crate::usage::WalletSample> =
+        series.iter().filter(|s| s.currency == "CNY").collect();
+    assert_eq!(usd.len(), 1, "the unchanged USD wallet records nothing");
+    assert_eq!(cny.len(), 3, "bridge + new for the moved wallet");
+    assert_eq!(cny[2].amount, 60.14);
+}
+
+#[test]
+fn wallet_series_prunes_past_retention_but_keeps_the_bridge() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let name = crate::profile::ProfileName::from("ds-prune");
+    let now = crate::usage::now_ms();
+    crate::profile::append_wallet_readings_at(
+        &name,
+        &wallet_stats(&[("api balance", "5.00 CNY")]),
+        now - 3 * 24 * 3_600_000,
+    );
+    crate::profile::append_wallet_readings_at(
+        &name,
+        &wallet_stats(&[("api balance", "4.00 CNY")]),
+        now - 3_600_000,
+    );
+    crate::profile::prune_wallet_history(&name);
+    let series = crate::profile::load_wallet_history(&name);
+    // The 3-day-old reading drops; the 1-hour-old bridge pair stays.
+    assert_eq!(series.len(), 2, "{series:?}");
+    assert_eq!(series[0].amount, 5.0);
+    assert_eq!(series[1].amount, 4.0);
+}
+
+#[test]
+fn fetch_third_party_due_appends_the_wallet_series_beside_the_stats_cache() {
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::register_names(&["ds-live"]);
+    let state = third_party_state(stub_wallet_stats);
+    crate::usage::reset_request_slots();
+    fetch_third_party_due(&state, vec![tp_entry("ds-live")]);
+    let series = crate::profile::load_wallet_history(&crate::profile::ProfileName::from("ds-live"));
+    assert_eq!(series.len(), 1, "{series:?}");
+    assert_eq!(
+        (
+            series[0].label.as_str(),
+            series[0].amount,
+            series[0].currency.as_str()
+        ),
+        ("api balance", 18.89, "CNY")
+    );
+}
+
+#[test]
+fn a_failed_third_party_fetch_appends_no_wallet_readings() {
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::register_names(&["ds-dead"]);
+    let state = third_party_state(stub_network_error);
+    crate::usage::reset_request_slots();
+    fetch_third_party_due(&state, vec![tp_entry("ds-dead")]);
+    assert!(
+        crate::profile::load_wallet_history(&crate::profile::ProfileName::from("ds-dead"))
+            .is_empty()
+    );
+}
+
 /// A generic profile whose fetch found nothing is NOT session-suppressed: its
 /// transient no-data is already clamped by the fetch deferral, and suppressing
 /// stopped it from rescanning for the whole session. The AuthExpired arm stays.
@@ -5222,7 +5368,8 @@ fn bootstrap_third_party_seeds_any_cache() {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        FetchStatus, ThirdPartyStatusStore, ThirdPartyUsageStore, bootstrap_third_party, now_ms,
+        FetchStatus, ThirdPartyStatusStore, ThirdPartyUsageStore, UsageStore,
+        bootstrap_third_party, now_ms,
     };
     use crate::profile::profile_subpath;
     use crate::profile_cache::{THIRD_PARTY_CACHE_FILE, write_profile_cache};
@@ -5233,6 +5380,9 @@ fn bootstrap_third_party_seeds_any_cache() {
     let store: ThirdPartyUsageStore = Arc::new(RankedMutex::new(HashMap::new()));
     let status: ThirdPartyStatusStore = Arc::new(RankedMutex::new(HashMap::new()));
     let last_fetched: LastFetchedAt = Arc::new(RankedMutex::new(HashMap::new()));
+    // The OAuth-shaped map the auto-switch walk reads: a seeded third-party
+    // account has to reach it too, or its window is invisible to the chain.
+    let usage_store_for_mirror: UsageStore = Arc::new(RankedMutex::new(HashMap::new()));
 
     let stats = |pct: f64| ThirdPartyStats {
         is_available: true,
@@ -5249,7 +5399,7 @@ fn bootstrap_third_party_seeds_any_cache() {
         best_effort: false,
     };
     // Fresh cache (just written) seeds `Fresh`; a 2h-old cache seeds `Cached`.
-    crate::testutil::register_names(&["cached", "stale"]);
+    crate::testutil::register_names(&["cached", "stale", "windowless"]);
     write_profile_cache(
         &crate::profile::ProfileName::from("cached"),
         THIRD_PARTY_CACHE_FILE,
@@ -5259,6 +5409,27 @@ fn bootstrap_third_party_seeds_any_cache() {
         &crate::profile::ProfileName::from("stale"),
         THIRD_PARTY_CACHE_FILE,
         &stats(20.0),
+    );
+    // A best-effort cache the derivation declines: whatever the mirror held
+    // for the account must be REMOVED, not left standing — a provider that
+    // stopped publishing windows must not keep answering the walk with a
+    // frozen figure.
+    let mut windowless = stats(50.0);
+    windowless.best_effort = true;
+    write_profile_cache(
+        &crate::profile::ProfileName::from("windowless"),
+        THIRD_PARTY_CACHE_FILE,
+        &windowless,
+    );
+    usage_store_for_mirror.lock().unwrap().insert(
+        "windowless".to_string(),
+        crate::usage::UsageInfo {
+            five_hour: Some(crate::usage::UsageWindow {
+                utilization: 50.0,
+                resets_at: None,
+            }),
+            ..Default::default()
+        },
     );
     let stale_path = profile_subpath(
         &crate::profile::ProfileName::from("stale"),
@@ -5270,9 +5441,15 @@ fn bootstrap_third_party_seeds_any_cache() {
         SystemTime::now() - Duration::from_secs(2 * 3600),
     );
 
-    let entries = vec![tp_entry("cached"), tp_entry("stale"), tp_entry("missing")];
+    let entries = vec![
+        tp_entry("cached"),
+        tp_entry("stale"),
+        tp_entry("windowless"),
+        tp_entry("missing"),
+    ];
     bootstrap_third_party(
         &store,
+        &usage_store_for_mirror,
         &status,
         &last_fetched,
         &entries,
@@ -5290,6 +5467,31 @@ fn bootstrap_third_party_seeds_any_cache() {
     assert!(
         !store.lock().unwrap().contains_key("missing"),
         "a profile with no cache is left for the scheduler"
+    );
+    assert_eq!(
+        usage_store_for_mirror
+            .lock()
+            .unwrap()
+            .get("cached")
+            .and_then(|u| u.five_hour.as_ref())
+            .map(|w| w.utilization),
+        Some(12.0),
+        "the seeded window is mirrored into the map auto-switch reads"
+    );
+    assert!(
+        !usage_store_for_mirror
+            .lock()
+            .unwrap()
+            .contains_key("missing"),
+        "a profile with no cache contributes no mirrored window either"
+    );
+    assert!(
+        !usage_store_for_mirror
+            .lock()
+            .unwrap()
+            .contains_key("windowless"),
+        "a cache the derivation declines REMOVES the mirrored entry, so a \
+         stopped publication stops answering the walk"
     );
     assert_eq!(
         status.lock().unwrap().get("cached").copied(),
@@ -5320,6 +5522,42 @@ fn bootstrap_third_party_seeds_any_cache() {
     assert!(
         stamp <= now && stamp >= now.saturating_sub(5_000),
         "the seeded third-party profile stamps last_fetched at the cache mtime"
+    );
+}
+
+/// The mirror's `None` arm on its own — the stale-cache guard half of
+/// `publish_third_party_windows`'s own doc, which the bootstrap test above
+/// drives only through a seeded cache: a provider that stopped publishing
+/// windows has no current reading, and a frozen entry would keep answering
+/// the walk with a figure nothing refreshes.
+#[test]
+fn a_none_derivation_removes_the_mirrored_window() {
+    use super::publish_third_party_windows;
+    use crate::profile::ProfileName;
+    use crate::usage::{UsageInfo, UsageWindow};
+
+    let store: UsageStore = Arc::new(RankedMutex::new(HashMap::new()));
+    let name = ProfileName::from("windowless");
+    let live = UsageInfo {
+        five_hour: Some(UsageWindow {
+            utilization: 40.0,
+            resets_at: None,
+        }),
+        ..Default::default()
+    };
+    store
+        .lock()
+        .unwrap()
+        .insert("windowless".to_string(), live.clone());
+    publish_third_party_windows(&store, &name, None);
+    assert!(
+        !store.lock().unwrap().contains_key("windowless"),
+        "a stopped publication removes the entry the walk reads"
+    );
+    publish_third_party_windows(&store, &name, Some(live));
+    assert!(
+        store.lock().unwrap().contains_key("windowless"),
+        "a resumed publication re-inserts it"
     );
 }
 
@@ -5363,6 +5601,7 @@ fn a_disk_pair_that_moved_past_the_spent_token_is_returned_not_quarantined() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     crate::profile::save_profile(&p).expect("save profile");
@@ -5398,6 +5637,7 @@ fn carrying_an_external_rotation_clears_a_stale_quarantine() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     crate::profile::save_profile(&p).expect("save profile");
@@ -9113,6 +9353,7 @@ fn write_live_mirror(access: &str, expires_at: i64) {
             expires_at: Some(expires_at),
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(&live, serde_json::to_vec(&creds).expect("serialize mirror"))
@@ -9709,6 +9950,7 @@ fn write_rolling_sidecar(name: &str, exp_in_ms: i64) {
             expires_at: Some(crate::usage::now_ms() as i64 + exp_in_ms),
             scopes: Some(vec!["user:inference".into(), "user:profile".into()]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("stamp rolling sidecar");
@@ -10167,6 +10409,7 @@ fn claude_rolling_tick_relogin_hold_releases_on_a_credential_write() {
                 expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         })
         .expect("ser"),
@@ -10210,6 +10453,7 @@ fn claude_rolling_tick_reaches_the_gate_for_a_misfilled_sidecar() {
                 expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         })
         .expect("ser"),

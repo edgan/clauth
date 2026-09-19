@@ -886,6 +886,44 @@ fn windows_prose_dates_an_unknown_and_never_marks_it_stale() {
     );
 }
 
+/// The wallet-burn rate rides the balance it qualifies, before the freshness
+/// clause — the shortfall-report shape: the figure and its pace, the caller
+/// judges the runway.
+#[test]
+fn windows_prose_appends_the_wallet_burn_rate_to_the_figure() {
+    assert_eq!(
+        windows_prose(&serde_json::json!({
+            "kind": "third_party",
+            "balance": "api balance: 2.53 CNY",
+            "provider_windows": false,
+            "wallet_burn_per_day": 4.17,
+            "wallet_burn_currency": "CNY",
+        })),
+        "no 5h/7d limits; api balance: 2.53 CNY · ~4.2 CNY/day",
+    );
+    assert_eq!(
+        windows_prose(&serde_json::json!({
+            "kind": "third_party",
+            "balance": "pro: 5h 12.5%, 7d 48%",
+            "provider_windows": true,
+            "wallet_burn_per_day": 4.17,
+            "wallet_burn_currency": "CNY",
+            "fetched_secs_ago": 30,
+        })),
+        "pro: 5h 12.5%, 7d 48% · ~4.2 CNY/day (cached 30s ago)",
+    );
+    // No rate fields, no clause — an account without a trustworthy slope
+    // renders exactly as it did before.
+    assert_eq!(
+        windows_prose(&serde_json::json!({
+            "kind": "third_party",
+            "balance": "api balance: 2.53 CNY",
+            "provider_windows": false,
+        })),
+        "no 5h/7d limits; api balance: 2.53 CNY",
+    );
+}
+
 #[test]
 fn profiles_prose_renders_each_row_with_unknown_for_null_fields() {
     // One carrier per row: the third-party account's figures ride its `windows`
@@ -1615,6 +1653,26 @@ fn a_listing_row_renders_a_zero_span_as_a_length_not_as_an_instant() {
     assert!(
         !listed.contains("now ago") && !listed.contains("elapsed now"),
         "a span never reads as an instant: {listed}"
+    );
+}
+
+/// An orphan is always at least a day old (silence past `RUNNING_TTL_MS` is
+/// what makes one), and its age renders at the day scale — where the zero
+/// hour remainder is the canonical spelling, not an edge: `1d 0h`, never `1d`
+/// or `24h`. The `1d 1h` remainder shape is pinned by `humanize_duration`'s
+/// own test; this pins the zero one.
+#[test]
+fn an_orphaned_row_renders_the_day_scale_spelling() {
+    let listed = monitor_state_prose(&serde_json::json!({
+        "status": "armed",
+        "jobs": [
+            {"job_id": "d-e-0", "profile": "five", "state": "orphaned", "since_secs": 86_400},
+        ],
+    }));
+
+    assert!(
+        listed.contains("job `d-e-0` orphaned on `five`, last seen 1d 0h ago"),
+        "{listed}"
     );
 }
 

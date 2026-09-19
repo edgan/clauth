@@ -809,15 +809,22 @@ fn freshness_clause(v: &Value) -> String {
             String::new()
         };
     };
-    let when = if secs == 0 {
-        "just now".to_string()
-    } else {
-        format!("{} ago", humanize_duration(secs as i64))
-    };
+    let when = cached_when(secs);
     if stale {
         format!(" (cached {when}, stale)")
     } else {
         format!(" (cached {when})")
+    }
+}
+
+/// The `when` half of every `cached` clause: zero reads as just-written,
+/// anything older is a duration. One spelling, so the headroom prose, a dated
+/// unknown and a routing refusal all date a figure the same way.
+pub(crate) fn cached_when(secs: u64) -> String {
+    if secs == 0 {
+        "just now".to_string()
+    } else {
+        format!("{} ago", humanize_duration(secs as i64))
     }
 }
 
@@ -828,12 +835,7 @@ fn age_clause(v: &Value) -> String {
     let Some(secs) = v.get("fetched_secs_ago").and_then(Value::as_u64) else {
         return String::new();
     };
-    let when = if secs == 0 {
-        "just now".to_string()
-    } else {
-        format!("{} ago", humanize_duration(secs as i64))
-    };
-    format!(" (cached {when})")
+    format!(" (cached {})", cached_when(secs))
 }
 
 /// The headroom clause, off the discriminated payload
@@ -846,7 +848,7 @@ fn age_clause(v: &Value) -> String {
 ///
 /// A third-party account is told it has no 5h/7d limit only when clauth knows
 /// it has none. A provider that publishes usage windows of its own (z.ai,
-/// Alibaba) HAS the limits whether or not this one response carried any, so a
+/// Alibaba, MiniMax) HAS the limits whether or not this one response carried any, so a
 /// denial beside its figure is false; a provider answering with a wallet or a
 /// counter (DeepSeek, ollama, a generic endpoint) has none, and saying so is
 /// what stops its figure reading as one more window someone can wait out. The
@@ -879,6 +881,15 @@ fn windows_prose(windows: &Value) -> String {
             } else {
                 format!("no 5h/7d limits; {figure}")
             };
+            // The wallet-burn rate rides the figure it qualifies — the same
+            // first-class-figure shape the Usage tab's rate rows carry, so a
+            // reader picking a delegate target judges the runway themselves.
+            if let (Some(per_day), Some(currency)) = (
+                windows.get("wallet_burn_per_day").and_then(Value::as_f64),
+                windows.get("wallet_burn_currency").and_then(Value::as_str),
+            ) {
+                out.push_str(&format!(" · ~{per_day:.1} {currency}/day"));
+            }
             out.push_str(&freshness_clause(windows));
             out
         }

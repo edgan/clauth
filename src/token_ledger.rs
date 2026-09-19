@@ -44,10 +44,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::pricing::HourTokens;
-use crate::tokens::{DayModelTokens, DayTokens, ModelDayAcc, ModelTokens, TokenStats};
+use crate::tokens::{DayModelTokens, DayTokens, ModelDayAcc, ModelTokens, TokenStats, UsageShape};
 use crate::usage::{epoch_secs_to_iso, iso_to_epoch_secs};
 
 const LEDGER_FILE: &str = "token_ledger.json";
+
+/// The usage-shape classifier version this build re-derives recorded days
+/// under. Each classifier change bumps it; every ledger stamped below it owes
+/// exactly one re-derive pass.
+pub(crate) const SHAPE_CLF_VERSION: u16 = 3;
 
 /// One model's stored split for one day (mirrors [`ModelTokens`] without the
 /// redundant `model` name, which is the map key). `hours` is the schema-v2
@@ -58,6 +63,12 @@ struct WireModel {
     output: u64,
     cache_read: u64,
     cache_create: u64,
+    /// How the model's usage rows reported cache, per the shape classifier.
+    /// Absent in files written before the classifier: `serde(default)` reads
+    /// it [`UsageShape::Healthy`], which never corrects — so a pre-classifier
+    /// row keeps rendering as before.
+    #[serde(default, skip_serializing_if = "is_default_shape")]
+    shape: UsageShape,
     /// Per-hour buckets, index = hour 0..23. A v1 file (no `hours` key) loads
     /// with `None` — serde leaves an absent `Option` field `None`; the explicit
     /// `default` is belt-and-braces per the schema contract. `skip_serializing_if`
@@ -65,6 +76,10 @@ struct WireModel {
     /// gains `hours` entries as new days are recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hours: Option<[WireHour; 24]>,
+}
+
+fn is_default_shape(s: &UsageShape) -> bool {
+    *s == UsageShape::Healthy
 }
 
 /// One hour's token buckets on the wire — the serde twin of [`HourTokens`]
@@ -115,6 +130,13 @@ pub(crate) struct Ledger {
     /// pre-upgrade ledger owe exactly one pass.
     #[serde(default)]
     backfill_done: bool,
+    /// Version of the usage-shape classifier the recorded days were last
+    /// re-derived under. Absent (0) in every file written before the field
+    /// existed — including v1 files whose `rederive_done` flag read true, a
+    /// key serde now ignores — so each older ledger owes exactly one pass
+    /// under the current classifier.
+    #[serde(default)]
+    shape_clf: u16,
 }
 
 impl Ledger {
@@ -178,6 +200,7 @@ impl Ledger {
                     output: w.output,
                     cache_read: w.cache_read,
                     cache_create: w.cache_create,
+                    shape: w.shape,
                 };
                 day_in_out = day_in_out.saturating_add(split.in_out());
                 base.daily_models.push(DayModelTokens {
@@ -239,6 +262,7 @@ impl Ledger {
                     output: split.output,
                     cache_read: split.cache_read,
                     cache_create: split.cache_create,
+                    shape: split.shape,
                     hours: d.hours.map(|hs| hs.map(WireHour::from)),
                 },
             );
@@ -306,6 +330,82 @@ impl Ledger {
             }
         }
         self.backfill_done = true;
+    }
+
+    /// The watermark date the one-shot shape re-derive may sweep up to, when
+    /// that pass still has work: `shape_clf` below [`SHAPE_CLF_VERSION`] and
+    /// at least one day strictly before `today`. Every row re-checks,
+    /// whole-prompt-marked ones included — a wrong classifier stamps wrong
+    /// markers, so no stored shape short-circuits the pass. Also `None` when
+    /// there is no watermark to derive a cutoff from.
+    pub(crate) fn rederive_through(&self, today: &str) -> Option<String> {
+        if self.shape_clf >= SHAPE_CLF_VERSION {
+            return None;
+        }
+        let owed = self.days.keys().any(|date| date.as_str() < today);
+        owed.then(|| self.recorded_through.clone()).flatten()
+    }
+
+    /// Correct the stored days from a re-derived transcript corpus
+    /// ([`crate::tokens::backfill_corpus`], whose parse classifies + corrects
+    /// per (file, model)). Coverage-gated: a stored row whose re-derivation
+    /// equals it on output, cache-read and cache-create was built from the
+    /// same rows, so whatever its `input` delta is, it is pure classification
+    /// — adopt the re-derived input, shape and hours. No per-direction
+    /// arithmetic can gate this: a mixed day (some files legitimately
+    /// corrected, some over- or under-corrected by an earlier classifier)
+    /// matches no exact relation against the stored split, so the v2
+    /// re-derive left exactly those days uncorrected. Any other mismatch
+    /// means the corpus no longer covers the day (pruned): the row keeps its
+    /// recorded values and gets the [`UsageShape::Healthy`] marker, which
+    /// never corrects — unverifiable rather than silently corrected. Days the
+    /// corpus cannot reach at all stay entirely untouched (same marker
+    /// rule). Stamps [`SHAPE_CLF_VERSION`] either way.
+    pub(crate) fn rederive_shapes(&mut self, derived: &HashMap<(String, String), ModelDayAcc>) {
+        for ((date, model), acc) in derived {
+            let Some(day) = self.days.get_mut(date) else {
+                continue;
+            };
+            let Some(w) = day.get_mut(model) else {
+                continue;
+            };
+            if acc.flat.output == w.output
+                && acc.flat.cache_read == w.cache_read
+                && acc.flat.cache_create == w.cache_create
+            {
+                w.input = acc.flat.input;
+                w.hours = Some(acc.hours.map(WireHour::from));
+                w.shape = acc.flat.shape;
+            }
+            // Any other mismatch: unverifiable — keep values, keep the
+            // never-correcting `Healthy` marker.
+        }
+        self.shape_clf = SHAPE_CLF_VERSION;
+    }
+
+    /// Test-only: the shape-classifier version the days were re-derived under.
+    #[cfg(test)]
+    pub(crate) fn shape_clf(&self) -> u16 {
+        self.shape_clf
+    }
+
+    /// Test-only: one stored day/model row's fields.
+    #[cfg(test)]
+    pub(crate) fn wire_model_fields(
+        &self,
+        date: &str,
+        model: &str,
+    ) -> Option<(u64, u64, u64, u64, UsageShape, bool)> {
+        self.days.get(date)?.get(model).map(|w| {
+            (
+                w.input,
+                w.output,
+                w.cache_read,
+                w.cache_create,
+                w.shape,
+                w.hours.is_some(),
+            )
+        })
     }
 }
 

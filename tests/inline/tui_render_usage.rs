@@ -218,6 +218,7 @@ fn empty_msg_failed_fetch_is_terminal() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     profile.fetch_status = Some(FetchStatus::Failed);
@@ -234,6 +235,7 @@ fn empty_msg_pending_fetch_loads() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     assert_eq!(oauth_empty_msg(&profile), "loading");
@@ -253,6 +255,7 @@ fn empty_msg_disabled_profile_is_terminal() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     profile.disabled = true;
@@ -267,10 +270,11 @@ fn tp_rows_disabled_profile_is_terminal() {
     let mut profile = crate::testutil::blank_profile(&crate::profile::ProfileName::from("a"));
     profile.disabled = true;
     // No `third_party_usage`, no fetch_status → the un-fixed path returns "loading".
-    let rendered: Vec<String> = build_tp_rows(&profile, 52, false, false, ResetFmt::default())
-        .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
-        .collect();
+    let rendered: Vec<String> =
+        build_tp_rows(&profile, 52, false, false, ResetFmt::default(), None)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+            .collect();
     assert!(
         rendered.iter().any(|l| l.contains("no usage available")),
         "disabled tp body is terminal, got {rendered:?}"
@@ -278,6 +282,93 @@ fn tp_rows_disabled_profile_is_terminal() {
     assert!(
         !rendered.iter().any(|l| l.contains("loading")),
         "disabled tp body must not spin loading, got {rendered:?}"
+    );
+}
+
+/// The wallet-burn rate rides the funded wallet's balance row — the wallet
+/// sibling of the window bars' `· rate` eyebrow section. A two-wallet
+/// provider lists both rows under the same label, so the match is on
+/// (label, currency) and the unfunded row stays bare; a cold series leaves
+/// every row exactly as it rendered before.
+#[test]
+fn tp_rows_append_the_wallet_burn_rate_to_the_balance_row() {
+    let mut profile = crate::testutil::blank_profile(&crate::profile::ProfileName::from("ds"));
+    profile.base_url = Some("https://api.deepseek.com/anthropic".to_string());
+    profile.provider =
+        crate::providers::Provider::from_base_url("https://api.deepseek.com/anthropic");
+    profile.third_party_usage = Some(crate::providers::ThirdPartyStats {
+        is_available: true,
+        rows: vec![
+            crate::providers::StatRow {
+                label: "USD balance".to_string(),
+                value: String::new(),
+                kind: crate::providers::StatRowKind::Heading,
+            },
+            crate::providers::StatRow {
+                label: "api balance".to_string(),
+                value: "0.00 USD".to_string(),
+                kind: crate::providers::StatRowKind::Body,
+            },
+            crate::providers::StatRow {
+                label: "CNY balance".to_string(),
+                value: String::new(),
+                kind: crate::providers::StatRowKind::Heading,
+            },
+            crate::providers::StatRow {
+                label: "api balance".to_string(),
+                value: "63.34 CNY".to_string(),
+                kind: crate::providers::StatRowKind::Body,
+            },
+        ],
+        bars: vec![],
+        plan: None,
+        endpoint: None,
+        best_effort: false,
+    });
+    let stringify = |lines: &[Line<'static>]| -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+            .collect()
+    };
+    let rate = crate::usage::WalletRate {
+        label: "api balance".to_string(),
+        currency: "CNY".to_string(),
+        amount: 63.34,
+        per_day: 4.17,
+    };
+    let rendered = stringify(&build_tp_rows(
+        &profile,
+        52,
+        false,
+        false,
+        ResetFmt::default(),
+        Some(&rate),
+    ));
+    assert!(
+        rendered
+            .iter()
+            .any(|l| l.contains("63.34 CNY") && l.contains("~4.2 CNY/day")),
+        "the rate rides the funded balance row: {rendered:?}"
+    );
+    assert!(
+        !rendered
+            .iter()
+            .any(|l| l.contains("0.00 USD") && l.contains("/day")),
+        "the unfunded same-label row stays bare: {rendered:?}"
+    );
+    let bare = stringify(&build_tp_rows(
+        &profile,
+        52,
+        false,
+        false,
+        ResetFmt::default(),
+        None,
+    ));
+    assert!(
+        bare.iter()
+            .any(|l| l.contains("63.34 CNY") && !l.contains("/day")),
+        "a cold series leaves the balance row bare: {bare:?}"
     );
 }
 
@@ -295,10 +386,11 @@ fn tp_rows_render_a_refusal_under_the_figures_it_qualifies() {
         serde_json::from_str(crate::testutil::DEEPSEEK_UNFUNDED_CACHE_BYTES)
             .expect("the unfunded balance cache parses"),
     );
-    let rendered: Vec<String> = build_tp_rows(&profile, 52, false, false, ResetFmt::default())
-        .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
-        .collect();
+    let rendered: Vec<String> =
+        build_tp_rows(&profile, 52, false, false, ResetFmt::default(), None)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+            .collect();
     assert!(
         rendered.iter().any(|l| l.contains("0.00 CNY")),
         "the wallet figure must survive the refusal, got {rendered:?}"
@@ -321,10 +413,11 @@ fn tp_rows_uncredentialed_profile_is_terminal() {
     profile.provider =
         crate::providers::Provider::from_base_url("https://api.deepseek.com/anthropic");
     profile.api_key = None;
-    let rendered: Vec<String> = build_tp_rows(&profile, 52, false, false, ResetFmt::default())
-        .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
-        .collect();
+    let rendered: Vec<String> =
+        build_tp_rows(&profile, 52, false, false, ResetFmt::default(), None)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+            .collect();
     assert!(
         !rendered.iter().any(|l| l.contains("loading")),
         "a profile no leg will fetch must not spin loading, got {rendered:?}"
@@ -346,10 +439,11 @@ fn tp_rows_empty_key_profile_is_terminal() {
         profile.provider =
             crate::providers::Provider::from_base_url("https://api.deepseek.com/anthropic");
         profile.api_key = Some(key);
-        let rendered: Vec<String> = build_tp_rows(&profile, 52, false, false, ResetFmt::default())
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
-            .collect();
+        let rendered: Vec<String> =
+            build_tp_rows(&profile, 52, false, false, ResetFmt::default(), None)
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+                .collect();
         assert!(
             !rendered.iter().any(|l| l.contains("loading")),
             "a profile no leg will fetch must not spin loading, got {rendered:?}"
@@ -367,7 +461,7 @@ fn tp_rows_empty_key_profile_is_terminal() {
 #[test]
 fn tp_rows_auth_expired_copy_splits_by_credential() {
     let body = |profile: &super::Profile| -> String {
-        build_tp_rows(profile, 52, false, false, ResetFmt::default())
+        build_tp_rows(profile, 52, false, false, ResetFmt::default(), None)
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
             .collect::<Vec<_>>()
@@ -437,7 +531,7 @@ fn tp_body_rows_share_one_value_column() {
     // A body row is `["  " + key_cell, value]`, so the value's start column is
     // the width of everything before it.
     let starts: Vec<(String, usize)> =
-        build_tp_rows(&profile, 52, false, false, ResetFmt::default())
+        build_tp_rows(&profile, 52, false, false, ResetFmt::default(), None)
             .iter()
             .filter(|l| l.spans.len() == 2)
             .map(|l| {
@@ -471,10 +565,11 @@ fn tp_rows_console_only_alibaba_still_loads() {
         site: crate::profile::ConsoleSite::International,
         region: "ap-southeast-1".to_string(),
     });
-    let rendered: Vec<String> = build_tp_rows(&profile, 52, false, false, ResetFmt::default())
-        .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
-        .collect();
+    let rendered: Vec<String> =
+        build_tp_rows(&profile, 52, false, false, ResetFmt::default(), None)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+            .collect();
     assert!(
         rendered.iter().any(|l| l.contains("loading")),
         "a scheduled profile is still loading, got {rendered:?}"
@@ -494,6 +589,7 @@ fn header_lines_plan_falls_back_to_account_tier() {
             expires_at: None,
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     // No `usage`, no `third_party_usage` → the plan-label fallback is exercised.
@@ -548,6 +644,7 @@ fn header_lines_plan_shows_a_hybrid_oauth_profiles_fetched_tier() {
             expires_at: None,
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     profile.usage = Some(crate::usage::UsageInfo {
@@ -600,6 +697,7 @@ fn header_lines_plan_dashes_when_no_tier_is_known() {
             expires_at: None,
             scopes: None,
             subscription_type: Some("something_new".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     let header = HeaderState {

@@ -169,7 +169,7 @@ const VARIANT_SUFFIXES: &[&str] = &["thinking"];
 /// creation rate (the common case; the 1-hour rate is not modeled — the hourly
 /// axis has no TTL data). Missing upstream fields (e.g. a provider with no
 /// cache-write rate) default to `0.0`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub(crate) struct ModelRate {
     pub(crate) input: f64,
     pub(crate) output: f64,
@@ -460,7 +460,10 @@ impl PriceTable {
     /// the alias table ([`alias_for`]: `deepseek-chat` on a day inside one of
     /// its records prices that record's canonical id, which itself re-enters
     /// the full ladder). An id a row carries verbatim is never remapped by
-    /// either — both run only on a miss.
+    /// either — both run only on a miss. A final stage in this method and
+    /// [`cost_day`]: an id whose final path segment ends `-free` or `:free`
+    /// ([`is_free_variant`]) prices at all-zero rates — a reseller's free
+    /// variant no catalog row carries.
     ///
     /// Steps 1-2 and the retry ladder are [`ladder_index`]; the whole walk is
     /// memoized per `(id, date)`; step 3 is [`entry_rate`], the only half the
@@ -471,7 +474,11 @@ impl PriceTable {
     /// a table holding no store history); `None` when no model matches, and
     /// `None` for a matched row whose `effective_at` is after `date`.
     pub(crate) fn rate_at(&self, model: &str, date: &str, hour: u8) -> Option<ModelRate> {
-        let (models, idx) = self.matched(model, date)?;
+        let (models, idx) = match self.matched(model, date) {
+            Some(m) => m,
+            None if is_free_variant(model) => return Some(ModelRate::default()),
+            None => return None,
+        };
         entry_rate(&models[idx], date, hour)
     }
 
@@ -620,7 +627,11 @@ impl PriceTable {
         date: &str,
         hours: &[HourTokens; 24],
     ) -> Option<f64> {
-        let (models, idx) = self.matched(model, date)?;
+        let (models, idx) = match self.matched(model, date) {
+            Some(m) => m,
+            None if is_free_variant(model) => return Some(0.0),
+            None => return None,
+        };
         let priced = &models[idx];
         let mut total = 0.0;
         for (hour, h) in hours.iter().enumerate() {
@@ -756,6 +767,26 @@ fn variant_base(id: &str) -> Option<&str> {
     VARIANT_SUFFIXES
         .iter()
         .find_map(|suffix| strip_variant_suffix(id, suffix))
+}
+
+/// Whether the id's final path segment ends in `-free` or `:free`: a
+/// reseller's free variant of a model (`z-ai/glm-5.3-free`,
+/// `minimax/minimax-m3:free`), served at no charge on every date. A trailing
+/// 8-digit date stamp does not displace the marker. Priced at all-zero rates
+/// only on a full-walk miss — a catalog row carrying the id verbatim always
+/// wins first, so the rule never shadows a priced row.
+fn is_free_variant(model: &str) -> bool {
+    let mut seg = model.rsplit('/').next().unwrap_or(model);
+    if let Some((head, tail)) = seg.rsplit_once('-')
+        && tail.len() == 8
+        && tail.bytes().all(|b| b.is_ascii_digit())
+    {
+        seg = head;
+    }
+    seg.len() > 5
+        && seg.get(seg.len() - 5..).is_some_and(|tail| {
+            tail.eq_ignore_ascii_case("-free") || tail.eq_ignore_ascii_case(":free")
+        })
 }
 
 /// Strip one trailing `-<suffix>` variant marker, case-insensitively.

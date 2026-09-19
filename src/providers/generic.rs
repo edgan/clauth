@@ -3,13 +3,15 @@
 //! Derives the API origin from the profile's `base_url`, probes a small curated
 //! set of usage-endpoint paths against that origin (same host only — the api_key
 //! already authorises it for completions), and scans the first response that
-//! isn't an error envelope for percentage-windows (→ bars), scalar balances
-//! (→ text rows), and a plan/tier. The working endpoint is recorded on the
-//! returned stats so the next tick reuses it (one request steady-state).
+//! isn't an error envelope for percentage-windows and remaining-fraction
+//! windows (→ bars), scalar balances (→ text rows), and a plan/tier. The
+//! working endpoint is recorded on the returned stats so the next tick reuses
+//! it (one request steady-state).
 //!
 //! The scanner is a pure recursive walk over [`serde_json::Value`] — no
-//! per-provider code. Bars win: a percentage-bearing object becomes a bar; only
-//! when no bars are found do we harvest scalar balances into rows.
+//! per-provider code. Bars win: a percentage-bearing object or a
+//! remaining-fraction window becomes a bar; only when no bars are found do we
+//! harvest scalar balances into rows.
 
 use serde_json::Value;
 
@@ -119,12 +121,13 @@ fn is_error_envelope(value: &Value) -> bool {
 }
 
 /// Walk an arbitrary JSON value and extract `(plan, bars, rows)`. Bars take
-/// priority: a percentage-bearing object becomes a bar; scalar balances are
-/// harvested into rows only when no bars were found. Plan is independent.
+/// priority: a percentage-bearing or remaining-fraction object becomes a bar;
+/// scalar balances are harvested into rows only when no bars were found. Plan
+/// is independent.
 fn scan(value: &Value) -> (Option<String>, Vec<UsageBar>, Vec<StatRow>) {
     let mut plan = None;
     let mut bars: Vec<UsageBar> = Vec::new();
-    scan_inner(value, &mut plan, &mut bars);
+    scan_inner(value, None, &mut plan, &mut bars);
 
     let rows = if bars.is_empty() {
         let mut rows = Vec::new();
@@ -137,7 +140,12 @@ fn scan(value: &Value) -> (Option<String>, Vec<UsageBar>, Vec<StatRow>) {
     (plan, bars, rows)
 }
 
-fn scan_inner(value: &Value, plan: &mut Option<String>, bars: &mut Vec<UsageBar>) {
+fn scan_inner(
+    value: &Value,
+    parent_key: Option<&str>,
+    plan: &mut Option<String>,
+    bars: &mut Vec<UsageBar>,
+) {
     match value {
         Value::Object(obj) => {
             if plan.is_none()
@@ -145,16 +153,20 @@ fn scan_inner(value: &Value, plan: &mut Option<String>, bars: &mut Vec<UsageBar>
             {
                 *plan = Some(p);
             }
-            if let Some(bar) = extract_bar(obj) {
+            if let Some(bar) = extract_bar(obj, parent_key) {
                 bars.push(bar);
             }
-            for v in obj.values() {
-                scan_inner(v, plan, bars);
+            for (k, v) in obj.iter() {
+                scan_inner(v, Some(k), plan, bars);
             }
         }
         Value::Array(arr) => {
+            // The container key names the collection ("windows"), never an
+            // element — unless it parses as a window literal itself
+            // (`"5h": [{…}]`), where it is every element's window name.
+            let parent_key = parent_key.filter(|k| window_literal(k).is_some());
             for v in arr {
-                scan_inner(v, plan, bars);
+                scan_inner(v, parent_key, plan, bars);
             }
         }
         _ => {}
@@ -174,27 +186,42 @@ fn find_plan(obj: &serde_json::Map<String, Value>) -> Option<String> {
     })
 }
 
-/// A bar is an object carrying a percentage-like field in 0..=100, optionally a
-/// sibling reset timestamp, a label field, and absolute used/total amounts.
-fn extract_bar(obj: &serde_json::Map<String, Value>) -> Option<UsageBar> {
+/// A bar is an object carrying a percentage-like field in 0..=100 (with an
+/// optional sibling reset timestamp, label field, and absolute used/total
+/// amounts), or a remaining-fraction window: `remaining`/`left` in 0..=1 plus
+/// a parseable reset sibling (Anthropic-mirror proxies report the fraction
+/// LEFT, so pct = `(1 - remaining) * 100`). Both arms label through
+/// [`bar_label`]. The reset sibling is what separates a window from a
+/// balance-looking object; a `remaining` above 1 is an absolute count (z.ai),
+/// never a fraction.
+fn extract_bar(obj: &serde_json::Map<String, Value>, parent_key: Option<&str>) -> Option<UsageBar> {
     let pct = obj.iter().find_map(|(k, v)| {
         is_pct_key(k)
             .then(|| v.as_f64())
             .flatten()
             .filter(|&p| (0.0..=100.0).contains(&p))
-    })?;
+    });
     let resets_at = obj
         .iter()
         .find_map(|(k, v)| is_reset_key(k).then(|| parse_reset(v)).flatten());
-    let label = obj
-        .iter()
-        .find_map(|(k, v)| {
-            is_label_key(k)
-                .then(|| v.as_str())
-                .flatten()
-                .map(humanize_label)
-        })
-        .unwrap_or_else(|| "usage".to_string());
+    let Some(pct) = pct else {
+        let remaining = obj
+            .iter()
+            .find_map(|(k, v)| is_remaining_key(k).then(|| v.as_f64()).flatten())?;
+        if !(0.0..=1.0).contains(&remaining) {
+            return None;
+        }
+        let resets_at = resets_at?;
+        let label = bar_label(obj, parent_key);
+        return Some(UsageBar {
+            label,
+            pct: (1.0 - remaining) * 100.0,
+            resets_at: Some(resets_at),
+            used: None,
+            total: None,
+        });
+    };
+    let label = bar_label(obj, parent_key);
     // Absolute amounts. `total` prefers an explicit ceiling field; when the
     // object only carries `used` + `remaining` (z.ai), `used + remaining` is the
     // robust fallback so the bar still shows `x / y`.
@@ -416,6 +443,39 @@ fn is_total_key(k: &str) -> bool {
 
 fn is_remaining_key(k: &str) -> bool {
     matches!(k.to_ascii_lowercase().as_str(), "remaining" | "left")
+}
+
+/// Normalise `s` to a canonical window literal (`5h`, `7d`) when it parses as
+/// one case-insensitively; `None` for any other shape. A provider's `name`
+/// field carrying `5H`/`7D` is the same window as a map key's `5h`, so it
+/// must reach `window_duration_secs` as a literal, never humanized.
+fn window_literal(s: &str) -> Option<String> {
+    let lower = s.to_ascii_lowercase();
+    crate::usage::window_duration_secs(&lower).map(|_| lower)
+}
+
+/// The bar's label, shared by both extraction arms: the parent map's key when
+/// present — a map entry's key IS its window name, and overview_windows,
+/// roster_rank and `window_duration_secs` match the literal `5h`/`7d`, so
+/// anything else silently loses every window-derived feature (a key parsing
+/// as a window literal normalizes to it) — else the object's own label field
+/// (a window literal passes verbatim for the same reason; anything else
+/// humanizes), else "usage".
+fn bar_label(obj: &serde_json::Map<String, Value>, parent_key: Option<&str>) -> String {
+    if let Some(k) = parent_key {
+        return window_literal(k).unwrap_or_else(|| k.to_string());
+    }
+    obj.iter()
+        .find_map(|(k, v)| {
+            is_label_key(k)
+                .then(|| v.as_str())
+                .flatten()
+                .map(|s| match window_literal(s) {
+                    Some(lit) => lit,
+                    None => humanize_label(s),
+                })
+        })
+        .unwrap_or_else(|| "usage".to_string())
 }
 
 #[cfg(test)]

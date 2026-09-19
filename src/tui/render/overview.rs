@@ -504,8 +504,9 @@ fn render_overview_row(
     // Bracketed bars ([███░░░]) for overview account rows only; brackets stay
     // dim — the fetch-state cue lives on the countdown above instead.
     // Usage-page gauges, chain bars, and fallback thresholds stay bracket-less.
-    // OAuth windows come from `usage`; api-key/provider profiles have no `usage`,
-    // so the 5h/7d windows are synthesized from the matching third-party bars.
+    // OAuth windows come from `usage`; an api-key/provider profile carries
+    // `usage` only when it was seeded from its provider windows, and where it
+    // is absent the 5h/7d windows are synthesized from the matching bars.
     let (five_window, seven_window) = overview_windows(profile);
     // Drain-color each reset countdown by the window's burn rate — see
     // `drain_rate` for where that rate comes from per window.
@@ -671,8 +672,9 @@ fn deepseek_balance_cell(profile: &Profile, width: usize, amount_w: usize) -> Ve
 }
 
 /// The `(5h, 7d)` windows to show in the overview row. OAuth profiles use their
-/// live `UsageInfo`; api-key/provider profiles have no `UsageInfo`, so each slot
-/// is synthesized from the third-party bar whose label matches (`5h` / `7d`) —
+/// live `UsageInfo`; an api-key/provider profile carries one only when it was
+/// seeded from its provider windows, so each missing slot is synthesized from
+/// the third-party bar whose label matches (`5h` / `7d`) —
 /// the same labels `zai` decodes from its window codes. `None` per slot when no
 /// source exists (renders `—`).
 fn overview_windows(profile: &Profile) -> (Option<UsageWindow>, Option<UsageWindow>) {
@@ -832,6 +834,31 @@ fn fallback_flow_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         ]
     };
     lines.push(Line::from(caption));
+
+    // A wallet-bearing active's runway: its funded balance and burn rate, and
+    // how long the two hold — the wallet sibling of the projection above. No
+    // threshold and no warning hue; the figure and its pace, the operator
+    // judges. Gated on the cache selector (a profile edited off a third-party
+    // endpoint keeps its never-evicted store entry) and on enabled-ness (the
+    // usage tab renders a disabled account terminal, no figures).
+    if let Some(active) = cfg.state.active_profile.as_ref().and_then(|n| cfg.find(n))
+        && active.usage_cache_is_third_party()
+        && !active.is_disabled()
+        && let Some(rate) = app.wallet_rate_for(active)
+    {
+        let secs = (rate.amount / rate.per_day * 86_400.0) as i64;
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "{} drains in ~{}",
+                    rate.label,
+                    crate::usage::humanize_duration(secs)
+                ),
+                theme::faint(),
+            ),
+        ]));
+    }
 
     // `Off` projection: chain-wide, no target row to sit on — keep it a caption.
     if let Some((SwitchAction::Off, secs)) = &projection {
@@ -1106,7 +1133,9 @@ fn drain_reset_style(rate: Option<f64>, rate_unit: &str, window: &UsageWindow) -
 /// `history_cache`, so no disk read happens under the config guard. Every other
 /// window falls back to the window's own average pace, which needs no burn
 /// history at all: 7d moves too slowly for the recency weighting to say much,
-/// and a synthesized third-party window has no history to weigh.
+/// and a third-party window — bar-synthesized or seeded from the provider's
+/// derived usage — has no history to weigh, since no third-party leg ever
+/// appends `usage_history.jsonl`.
 fn drain_rate(
     app: &App,
     name: &crate::profile::ProfileName,
@@ -1115,6 +1144,7 @@ fn drain_rate(
     window: &UsageWindow,
 ) -> Option<f64> {
     if label == LABEL_5H
+        && !profile.usage_cache_is_third_party()
         && let Some(usage) = profile.usage.as_ref()
     {
         return app.active_burn_rate(name, usage);

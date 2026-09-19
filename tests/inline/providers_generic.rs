@@ -67,6 +67,275 @@ fn scan_scalar_balance_shape_yields_rows_not_bars() {
 }
 
 #[test]
+fn scan_cc_mirror_remaining_fraction_window_yields_one_bar() {
+    // Real shunt `GET /usage` shape: Anthropic-mirror pool windows as
+    // remaining FRACTIONS (0.93 left = 7% used), null for pools not in play.
+    let body = r#"{"pool":{"status":"ok","windows":{
+        "5h":{"remaining":null,"resets_at":null},
+        "7d":{"remaining":0.93,"resets_at":1789476836},
+        "fable":{"remaining":null,"resets_at":null}}}}"#;
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(!is_error_envelope(&value));
+
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "null windows and the 7d bar only: {bars:?}");
+    // Parent map key, verbatim: overview_windows, roster_rank and
+    // window_duration_secs all match the literal `7d`.
+    assert_eq!(bars[0].label, "7d");
+    // (1.0 - 0.93) is not exact in f64.
+    assert!((bars[0].pct - 7.0).abs() < 1e-6, "pct was {}", bars[0].pct);
+    // 1789476836 is epoch SECONDS: the 10^12 ms-heuristic must pick seconds.
+    assert_eq!(
+        bars[0].resets_at.as_deref(),
+        Some(crate::usage::epoch_secs_to_iso(1789476836).as_str())
+    );
+    assert!(bars[0].used.is_none() && bars[0].total.is_none());
+    assert!(rows.is_empty(), "a bar formed → no scalar rows");
+    assert!(plan.is_none());
+}
+
+#[test]
+fn a_remaining_fraction_with_no_reset_sibling_is_not_a_window() {
+    // A balance-looking object (`remaining` 0..=1, no reset) must not become a
+    // window bar — the reset sibling is the discriminator.
+    let value: serde_json::Value = serde_json::from_str(r#"{"data":{"remaining":0.5}}"#).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert!(bars.is_empty(), "no reset sibling → no bar: {bars:?}");
+    assert!(plan.is_none());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "remaining");
+    assert_eq!(rows[0].value, "0.50");
+}
+
+#[test]
+fn a_remaining_above_one_is_not_a_window() {
+    // z.ai carries `remaining` as an absolute TOKEN COUNT; only a fraction in
+    // 0..=1 is a window. Here without a percentage key, so the remaining arm
+    // is the one being guarded.
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"data":{"remaining":1000,"resets_at":1789476836}}"#).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert!(bars.is_empty(), "remaining above 1 → no bar: {bars:?}");
+    assert!(plan.is_none());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value, "1000");
+}
+
+#[test]
+fn array_nested_windows_are_labelled_by_each_elements_own_name_field() {
+    // A provider reporting windows as an ARRAY: no element has a key of its
+    // own, so the element's own `name` field must label its bar. Inheriting
+    // the container key would label every element identically, and neither
+    // bar would match the window machinery that keys on literal `5h`/`7d`.
+    let body = r#"{"windows":[
+        {"name":"5h","remaining":0.5,"resets_at":1789476836},
+        {"name":"7d","remaining":0.93,"resets_at":1789553236}]}"#;
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 2, "{bars:?}");
+    assert_eq!(bars[0].label, "5h");
+    assert_eq!(bars[1].label, "7d");
+    // Literal labels are what window_duration_secs parses; a container-key
+    // label ("windows") matches none of it.
+    assert_eq!(
+        crate::usage::window_duration_secs(&bars[0].label),
+        Some(5 * 3600)
+    );
+    assert_eq!(
+        crate::usage::window_duration_secs(&bars[1].label),
+        Some(7 * 86_400)
+    );
+    assert!((bars[0].pct - 50.0).abs() < 1e-6, "pct was {}", bars[0].pct);
+    assert!((bars[1].pct - 7.0).abs() < 1e-6, "pct was {}", bars[1].pct);
+    assert!(bars[0].resets_at.is_some() && bars[1].resets_at.is_some());
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn an_unnamed_array_nested_window_falls_back_to_usage() {
+    // No name field and no key of its own: the generic fallback, same as a
+    // root-level window. The container key is not the element's name.
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"windows":[{"remaining":0.5,"resets_at":1789476836}]}"#).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "usage");
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn a_case_variant_window_literal_name_stays_a_literal() {
+    // `5H` in an array element's name field is the same window as a map
+    // key's `5h`: normalised to the lowercase literal so the window
+    // machinery parses it, never humanized to "5 h".
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{"windows":[{"name":"5H","remaining":0.5,"resets_at":1789476836}]}"#,
+    )
+    .unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "5h");
+    assert_eq!(
+        crate::usage::window_duration_secs(&bars[0].label),
+        Some(5 * 3600)
+    );
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn a_map_nested_windows_key_beats_its_own_label_field() {
+    // For a map entry the key IS the window name and stays the label even
+    // when the object describes itself: literal `5h` is what the window
+    // machinery parses, a free-form name is not.
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{"5h":{"name":"five hour window","remaining":0.5,"resets_at":1789476836}}"#,
+    )
+    .unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "5h");
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn a_percentage_key_beats_the_remaining_fraction() {
+    // No double-bar when a CC-mirror object carries both shapes: the
+    // percentage key wins, the remaining arm fires only without one. The
+    // map key labels the pct bar like it labels a fraction window.
+    let body = r#"{"pool":{"windows":{"7d":{
+        "percentage":42,"remaining":0.93,"resets_at":1789476836}}}}"#;
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1);
+    assert!((bars[0].pct - 42.0).abs() < 1e-6, "pct was {}", bars[0].pct);
+    assert_eq!(bars[0].label, "7d");
+    assert!(rows.is_empty());
+    assert!(plan.is_none());
+}
+
+#[test]
+fn a_map_nested_percentage_window_key_beats_its_own_label_field() {
+    // Both arms share the label chain: for a map entry the key IS the
+    // window name, so a pct bar under `5h` labels `5h` even when the object
+    // describes itself, engaging the same window machinery.
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{"windows":{"5h":{"name":"five hour window","percentage":40,"resets_at":1789476836}}}"#,
+    )
+    .unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "5h");
+    assert!((bars[0].pct - 40.0).abs() < 1e-6, "pct was {}", bars[0].pct);
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn an_array_under_a_window_literal_key_keeps_the_literal() {
+    // `{"5h": [{…}]}`: the container key parses as a window literal, so it
+    // IS the element's window name and passes through the array leg; a
+    // non-literal container key ("windows") still does not.
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{"5h":[{"remaining":0.5,"resets_at":1789476836}],"7d":[{"percentage":40,"resets_at":1789476836}]}"#,
+    )
+    .unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 2, "{bars:?}");
+    assert_eq!(bars[0].label, "5h");
+    assert_eq!(bars[1].label, "7d");
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn a_case_variant_map_key_normalizes_to_the_window_literal() {
+    // `5H` as a map key is the same window as `5h`: the parent key
+    // normalizes to the canonical literal, not passed through verbatim.
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"5H":{"remaining":0.5,"resets_at":1789476836}}"#).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "5h");
+    assert_eq!(
+        crate::usage::window_duration_secs(&bars[0].label),
+        Some(5 * 3600)
+    );
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn a_left_key_with_a_reset_sibling_is_a_window() {
+    // `left` is the remaining-fraction arm's other key: same shape, same
+    // pct derivation.
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"quota":{"left":0.25,"resets_at":1789476836}}"#).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "quota");
+    assert!((bars[0].pct - 75.0).abs() < 1e-6, "pct was {}", bars[0].pct);
+    assert!(bars[0].resets_at.is_some());
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn a_live_fraction_with_a_null_reset_is_not_a_window() {
+    // A parseable reset sibling is the discriminator: null `resets_at` means
+    // the window is not in play, so a live fraction falls through to a row.
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"windows":{"5h":{"remaining":0.5,"resets_at":null}}}"#).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert!(bars.is_empty(), "null reset → no bar: {bars:?}");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "remaining");
+    assert_eq!(rows[0].value, "0.50");
+    assert!(plan.is_none());
+}
+
+#[test]
+fn a_root_level_window_uses_the_usage_fallback_label() {
+    // No parent key and no name field: the fallback label is "usage".
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"remaining":0.5,"resets_at":1789476836}"#).unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "usage");
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn a_zero_percentage_key_beats_the_remaining_fraction() {
+    // Percentage 0 is a real reading (a window nothing has drained), inside
+    // the 0..=100 range, so it wins the arm race against a live fraction —
+    // the fraction must not resurrect as the bar.
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{"windows":{"5h":{"percentage":0,"remaining":0.1,"resets_at":1789476836}}}"#,
+    )
+    .unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert!((bars[0].pct - 0.0).abs() < 1e-6, "pct was {}", bars[0].pct);
+    assert_eq!(bars[0].label, "5h");
+    assert!(rows.is_empty() && plan.is_none());
+}
+
+#[test]
+fn an_expiry_sibling_makes_a_fraction_a_window_and_bars_win() {
+    // `expires_at` counts as a reset sibling, so a fractional balance with an
+    // expiry becomes a bar — and bars present means NO scalar rows, even for
+    // a sibling balance that would otherwise render as a row.
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"credits":{"left":0.3,"expires_at":1789476836},"balance":12.5}"#)
+            .unwrap();
+    let (plan, bars, rows) = scan(&value);
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    assert_eq!(bars[0].label, "credits");
+    assert!((bars[0].pct - 70.0).abs() < 1e-6, "pct was {}", bars[0].pct);
+    assert!(
+        rows.is_empty(),
+        "bars present → the sibling balance row is suppressed: {rows:?}"
+    );
+    assert!(plan.is_none());
+}
+
+#[test]
 fn humanize_label_handles_cases() {
     assert_eq!(humanize_label("TIME_LIMIT"), "time limit");
     assert_eq!(humanize_label("modelCode"), "model code");

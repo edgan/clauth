@@ -63,9 +63,232 @@ use crate::usage::{epoch_secs_to_iso, iso_to_epoch_secs, now_epoch_secs};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(90);
 
+// ── Usage reporting shapes ───────────────────────────────────────────────────
+
+/// How one (transcript file, model)'s usage lines report cache. CC-side
+/// Anthropic-compat endpoints misreport in two known ways, detected from the
+/// usage rows' own structure — never from model names or hostnames, since the
+/// same model id is served by both a healthy and a broken endpoint on different
+/// days (the `glm-5.3` official-z.ai vs tokenrouter split). The discriminators,
+/// measured 2026-09-10 over the operator corpus: a whole-prompt reporter's
+/// `input` contains its cached prefix, so `input >= cache_read` on every
+/// non-degenerate row (a degenerate or mixed-segment row can dip below — the
+/// ladder's half-of-read-bearing fraction gate absorbs those);
+/// an Anthropic-shaped reporter accumulates
+/// `cache_read(t+1) ≈ cache_read(t) + input(t)` (under 1% deviation per
+/// pair, while a whole-prompt reporter that also caches the prior response
+/// reaches only `cache_read(t+1) ≈ input(t) + output(t)` and misses the
+/// `cache_read(t)` term at ~50% deviation); a fully-cached whole-prompt
+/// reporter emits `input == cache_read` exactly, per row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UsageShape {
+    /// Anthropic semantics: `input` is the uncached tail, cache metrics are
+    /// truthful. Nothing corrected.
+    #[default]
+    Healthy,
+    /// Whole prompt in `input` (OpenAI-shaped): the cached prefix is reported
+    /// in both `input` and `cache_read`, so every downstream number
+    /// double-counts it. `input` is corrected to `input - cache_read` per row.
+    WholePromptInput,
+    /// `cache_read` is present but no cache write is ever reported (always 0
+    /// `cache_create`): the read metric is truthful, the write metric is
+    /// absent. Nothing corrected, marked.
+    NoCacheWrites,
+    /// No cache metrics at all (both always 0): the provider reports only
+    /// in/out. Nothing corrected, no cache lens.
+    NoCacheReporting,
+}
+
+/// Usage rows below this count classify as [`UsageShape::Healthy`] — never
+/// correct on statistical evidence. The exact per-row signature
+/// (`input == cache_read`) is not statistical and checks before the floor.
+const USAGE_ROW_FLOOR: usize = 8;
+
+/// Relative deviation (percent) the accumulation identity
+/// `cache_read(t+1) ≈ cache_read(t) + input(t)` tolerates: measured
+/// 2026-09-10 over the operator corpus, true Anthropic-shaped pairs sit
+/// under 1%, while whole-prompt reporters that also cache the prior response
+/// miss the `cache_read(t)` term and deviate ~50%.
+const CHAIN_IDENTITY_TOLERANCE_PCT: u64 = 5;
+
+/// Absolute token slack the accumulation identity tolerates below its
+/// relative bound: cache counters are block-quantized (multiples of 64), so
+/// genuine early pairs with small denominators exceed the relative bound on
+/// rounding alone.
+const CHAIN_IDENTITY_SLACK_FLOOR: u64 = 128;
+
+/// Rank for merging shapes across rows of one aggregate: the strongest claim
+/// wins, so an aggregate touching any corrected row renders its marker.
+fn shape_rank(s: UsageShape) -> u8 {
+    match s {
+        UsageShape::WholePromptInput => 3,
+        UsageShape::NoCacheWrites => 2,
+        UsageShape::NoCacheReporting | UsageShape::Healthy => 0,
+    }
+}
+
+impl UsageShape {
+    /// Combine the shapes of rows folded into one aggregate row: the strongest
+    /// claim wins, so a model whose day-rows mix a healthy endpoint with a
+    /// whole-prompt one still renders the correction marker.
+    pub(crate) fn merge(self, other: UsageShape) -> UsageShape {
+        if shape_rank(other) > shape_rank(self) {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// Classify each (model)'s usage rows within one transcript file and correct
+/// whole-prompt `input` in place, stamping the class onto every usage row so
+/// downstream accumulations carry it. Runs after
+/// [`collapse_streamed_turns`], so streaming deltas never skew the evidence.
+/// Per (file, model) — the finest attribution the transcript offers (no
+/// endpoint field exists), which is what separates a model id served by a
+/// healthy endpoint on one day from a broken one on another.
+///
+/// The ladder, exact per-row evidence first:
+///
+/// 1. Any `cache_create > 0`: the write metric exists — Anthropic semantics,
+///    [`UsageShape::Healthy`]. Outranks every other signature: a file mixing
+///    write-bearing rows with fully-cached-looking ones is Anthropic-shaped,
+///    never corrected.
+/// 2. `input == cache_read` on a majority of read-bearing rows: the whole
+///    prompt is reported as fully cached — [`UsageShape::WholePromptInput`].
+///    Exact, so it decides even below [`USAGE_ROW_FLOOR`]; a majority, so one
+///    partial or degenerate row does not defeat the class.
+/// 3. Thin evidence means Anthropic semantics: [`UsageShape::Healthy`].
+/// 4. No read metric at all: [`UsageShape::NoCacheReporting`].
+/// 5. Anthropic-shaped read evidence dominates — [`UsageShape::NoCacheWrites`]:
+///    rows with `input < cache_read` reach at least half the read-bearing rows
+///    (a whole-prompt reporter's `input` contains its cached prefix, so a
+///    dipping row is Anthropic evidence; a mixed file after a mid-session
+///    endpoint swap or a degenerate row dips far below half), or the
+///    accumulation identity holds for a majority of pairs. The consequence
+///    `cache_read(t+1) > input(t)` alone is NOT the test, since a whole-prompt
+///    reporter that also caches the prior response reaches
+///    `cache_read(t+1) ≈ input(t) + output(t)` and beats it.
+/// 6. Otherwise `input` grows past a lagging read metric: whole-prompt
+///    reporting with a partially cached prompt —
+///    [`UsageShape::WholePromptInput`].
+fn apply_usage_shapes(recs: &mut [LineRec]) {
+    let mut by_model: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in recs.iter().enumerate() {
+        if r.has_usage {
+            by_model.entry(r.model.clone()).or_default().push(i);
+        }
+    }
+    for idxs in by_model.values() {
+        let any_cache_create = idxs.iter().any(|&i| recs[i].cache_create > 0);
+        let any_cache_read = idxs.iter().any(|&i| recs[i].cache_read > 0);
+
+        let shape = if any_cache_create {
+            UsageShape::Healthy
+        } else if majority_read_rows_input_eq_cache_read(recs, idxs) {
+            UsageShape::WholePromptInput
+        } else if idxs.len() < USAGE_ROW_FLOOR {
+            UsageShape::Healthy
+        } else if !any_cache_read {
+            UsageShape::NoCacheReporting
+        } else if anthropic_read_evidence(recs, idxs) {
+            UsageShape::NoCacheWrites
+        } else {
+            UsageShape::WholePromptInput
+        };
+
+        if shape == UsageShape::WholePromptInput {
+            // The cached prefix rides both `input` and `cache_read`; drop it
+            // from `input` so the uncached tail is what remains, per row.
+            for &i in idxs {
+                recs[i].input = recs[i].input.saturating_sub(recs[i].cache_read);
+            }
+        }
+        for &i in idxs {
+            recs[i].shape = shape;
+        }
+    }
+}
+
+/// Whether `input == cache_read` on a majority of the rows that report a
+/// read metric (at least one): the whole-prompt-fully-cached signature.
+/// Read-bearing rows only, so a cold-start or cache-field-absent row never
+/// votes; a majority, so one partial or degenerate row does not defeat the
+/// class.
+fn majority_read_rows_input_eq_cache_read(recs: &[LineRec], idxs: &[usize]) -> bool {
+    let mut bearing = 0usize;
+    let mut equal = 0usize;
+    for &i in idxs {
+        if recs[i].cache_read > 0 {
+            bearing += 1;
+            if recs[i].input == recs[i].cache_read {
+                equal += 1;
+            }
+        }
+    }
+    bearing > 0 && equal * 2 > bearing
+}
+
+/// Whether the Anthropic-shaped read evidence dominates: rows with
+/// `input < cache_read` reach at least half the read-bearing rows, or the
+/// accumulation identity holds for a majority of pairs. A whole-prompt
+/// reporter's `input` contains its cached prefix, so a dipping row is
+/// Anthropic evidence — but a mixed file (an endpoint swap mid-session) or a
+/// degenerate row dips without the file being Anthropic-shaped, and those
+/// measure far below half while the identity stays broken, so the fraction
+/// gates the sparse cases.
+fn anthropic_read_evidence(recs: &[LineRec], idxs: &[usize]) -> bool {
+    let mut bearing = 0usize;
+    let mut dips = 0usize;
+    for &i in idxs {
+        if recs[i].cache_read > 0 {
+            bearing += 1;
+            if recs[i].input < recs[i].cache_read {
+                dips += 1;
+            }
+        }
+    }
+    dips * 2 >= bearing || majority_pairs_cache_read_accumulates(recs, idxs)
+}
+
+/// Whether a majority of consecutive row pairs where BOTH rows report a read
+/// metric satisfy the accumulation identity `cache_read(t+1) ≈ cache_read(t) +
+/// input(t)` — the new tail joins the cached prefix — within
+/// [`CHAIN_IDENTITY_TOLERANCE_PCT`] relative deviation or
+/// [`CHAIN_IDENTITY_SLACK_FLOOR`] absolute tokens. A pair whose earlier row
+/// reports no read metric cannot discriminate: the identity degenerates to
+/// `cache_read(t+1) ≈ input(t)`, which a whole-prompt reporter that also
+/// caches the prior response satisfies within its `output(t)`; a pair whose
+/// later row reports none breaks the chain entirely. Neither is counted.
+fn majority_pairs_cache_read_accumulates(recs: &[LineRec], idxs: &[usize]) -> bool {
+    let mut counted = 0usize;
+    let mut accumulates = 0usize;
+    for w in idxs.windows(2) {
+        let (prev, next) = (&recs[w[0]], &recs[w[1]]);
+        if prev.cache_read == 0 || next.cache_read == 0 {
+            continue;
+        }
+        counted += 1;
+        let expected = prev.cache_read.saturating_add(prev.input);
+        let deviation = next.cache_read.abs_diff(expected);
+        let bound = (expected / 100)
+            .saturating_mul(CHAIN_IDENTITY_TOLERANCE_PCT)
+            .max(CHAIN_IDENTITY_SLACK_FLOOR);
+        if deviation <= bound {
+            accumulates += 1;
+        }
+    }
+    accumulates * 2 > counted
+}
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
-/// Per-model lifetime aggregate. `input`/`output` exclude cache; cache is separate.
+/// Per-model lifetime aggregate. `input`/`output` exclude cache; cache is
+/// separate. `input` is already the corrected uncached tail when the model's
+/// rows were classified [`UsageShape::WholePromptInput`] upstream in
+/// `parse_file`; [`ModelTokens::shape`] carries the class so the render can
+/// mark it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModelTokens {
     pub(crate) model: String,
@@ -73,6 +296,7 @@ pub(crate) struct ModelTokens {
     pub(crate) output: u64,
     pub(crate) cache_read: u64,
     pub(crate) cache_create: u64,
+    pub(crate) shape: UsageShape,
 }
 
 impl ModelTokens {
@@ -225,6 +449,9 @@ pub(crate) struct DaySummary {
     /// per model (rates differ by family) — the day's lifetime totals can't be
     /// isolated from `TokenStats::models`. Empty until the top-up populates it.
     pub(crate) models: Vec<ModelTokens>,
+    /// Strongest usage-reporting shape among the day's (file, model) rows,
+    /// so the day's headline rows can render the correction marker.
+    pub(crate) shape: UsageShape,
 }
 
 impl DaySummary {
@@ -485,6 +712,7 @@ pub(crate) fn load_base(claude_dir: &Path) -> Option<TokenStats> {
             output: u.output_tokens,
             cache_read: u.cache_read_input_tokens,
             cache_create: u.cache_creation_input_tokens,
+            shape: UsageShape::default(),
         })
         .collect();
     models.sort_unstable_by_key(|m| std::cmp::Reverse(m.total()));
@@ -693,6 +921,7 @@ pub(crate) fn period_models(days: &[DayModelTokens], from: &str, to: &str) -> Ve
                 e.split.output = e.split.output.saturating_add(s.output);
                 e.split.cache_read = e.split.cache_read.saturating_add(s.cache_read);
                 e.split.cache_create = e.split.cache_create.saturating_add(s.cache_create);
+                e.split.shape = e.split.shape.merge(s.shape);
                 e.days.push(PeriodDay {
                     date: d.date.clone(),
                     split: s.clone(),
@@ -771,6 +1000,10 @@ struct LineRec {
     output: u64,
     cache_read: u64,
     cache_create: u64,
+    /// How this row's provider reported cache; set per (file, model) by
+    /// [`apply_usage_shapes`]. `input` above is already the corrected uncached
+    /// tail when this is [`UsageShape::WholePromptInput`].
+    shape: UsageShape,
     tool_calls: u64,
 }
 
@@ -981,6 +1214,7 @@ fn merge_topup(
                     today_acc.output = today_acc.output.saturating_add(r.output);
                     today_acc.cache_read = today_acc.cache_read.saturating_add(r.cache_read);
                     today_acc.cache_create = today_acc.cache_create.saturating_add(r.cache_create);
+                    today_acc.shape = today_acc.shape.merge(r.shape);
                     add_to_hour(&mut today_acc.token_hours[r.hour as usize], r);
                     let tm = today_models
                         .entry(r.model.clone())
@@ -995,6 +1229,7 @@ fn merge_topup(
                     tm.flat.output = tm.flat.output.saturating_add(r.output);
                     tm.flat.cache_read = tm.flat.cache_read.saturating_add(r.cache_read);
                     tm.flat.cache_create = tm.flat.cache_create.saturating_add(r.cache_create);
+                    tm.flat.shape = tm.flat.shape.merge(r.shape);
                     add_to_hour(&mut tm.hours[r.hour as usize], r);
                 }
                 if r.date.as_str() > cutoff_date {
@@ -1013,6 +1248,7 @@ fn merge_topup(
                     dm.flat.output = dm.flat.output.saturating_add(r.output);
                     dm.flat.cache_read = dm.flat.cache_read.saturating_add(r.cache_read);
                     dm.flat.cache_create = dm.flat.cache_create.saturating_add(r.cache_create);
+                    dm.flat.shape = dm.flat.shape.merge(r.shape);
                     add_to_hour(&mut dm.hours[r.hour as usize], r);
                     let e = model_map
                         .entry(r.model.clone())
@@ -1024,6 +1260,7 @@ fn merge_topup(
                     e.output = e.output.saturating_add(r.output);
                     e.cache_read = e.cache_read.saturating_add(r.cache_read);
                     e.cache_create = e.cache_create.saturating_add(r.cache_create);
+                    e.shape = e.shape.merge(r.shape);
                     if max_date
                         .as_deref()
                         .is_none_or(|prev| r.date.as_str() > prev)
@@ -1131,9 +1368,10 @@ fn merge_topup(
 
 /// Parse one JSONL transcript into per-line contribution records, collapsing
 /// each turn's streaming deltas into its completed line (see
-/// [`collapse_streamed_turns`]). The cutoff/today split happens later in
-/// [`merge_topup`], so an advancing `last_computed_date` never forces a re-read.
-/// Silently skips parse errors.
+/// [`collapse_streamed_turns`]) and classifying + correcting the per-model
+/// usage shapes (see [`apply_usage_shapes`]). The cutoff/today split happens
+/// later in [`merge_topup`], so an advancing `last_computed_date` never forces
+/// a re-read. Silently skips parse errors.
 fn parse_file(path: &Path) -> Vec<LineRec> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -1226,10 +1464,13 @@ fn parse_file(path: &Path) -> Vec<LineRec> {
             output,
             cache_read,
             cache_create,
+            shape: UsageShape::Healthy,
             tool_calls,
         });
     }
-    collapse_streamed_turns(out)
+    let mut out = collapse_streamed_turns(out);
+    apply_usage_shapes(&mut out);
+    out
 }
 
 /// Collapse one assistant turn's streaming deltas into its completed line.
@@ -1239,25 +1480,32 @@ fn parse_file(path: &Path) -> Vec<LineRec> {
 /// output grows from 0 to the final value on distinct line uuids. Deduping on
 /// the id at merge time would keep the first (output=0) partial, so collapse
 /// here to the occurrence with the largest total footprint. This also makes the
-/// message/session/hour counters see one turn instead of every delta.
+/// message/session/hour counters see one turn instead of every delta. Output
+/// keeps first-occurrence order — replaced in place, never re-emitted from the
+/// dedup map — because the usage-shape ladder's chain arm reads consecutive
+/// turns.
 fn collapse_streamed_turns(recs: Vec<LineRec>) -> Vec<LineRec> {
-    let mut best: HashMap<String, LineRec> = HashMap::new();
-    let mut plain: Vec<LineRec> = Vec::new();
+    let mut out: Vec<LineRec> = Vec::new();
+    let mut idx_of: HashMap<String, usize> = HashMap::new();
     for rec in recs {
         if !rec.has_usage {
-            plain.push(rec);
+            out.push(rec);
             continue;
         }
-        let key = rec.tok_key.clone();
-        let keep = best
-            .get(&key)
-            .is_some_and(|prev| prev.total() >= rec.total());
-        if !keep {
-            best.insert(key, rec);
+        match idx_of.entry(rec.tok_key.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let prev = &mut out[*e.get()];
+                if prev.total() < rec.total() {
+                    *prev = rec;
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(out.len());
+                out.push(rec);
+            }
         }
     }
-    plain.extend(best.into_values());
-    plain
+    out
 }
 
 /// Fold one transcript file into per-(model, day) per-hour buckets for the
@@ -1379,6 +1627,7 @@ fn backfill_corpus(
                 acc.flat.output = acc.flat.output.saturating_add(r.output);
                 acc.flat.cache_read = acc.flat.cache_read.saturating_add(r.cache_read);
                 acc.flat.cache_create = acc.flat.cache_create.saturating_add(r.cache_create);
+                acc.flat.shape = acc.flat.shape.merge(r.shape);
                 add_to_hour(&mut acc.hours[r.hour as usize], &r);
             }
         }
@@ -1410,34 +1659,60 @@ fn run_backfill(
     claude_dir: &Path,
     ledger: &mut crate::token_ledger::Ledger,
     today: &str,
-    progress: impl FnMut(usize, usize),
+    mut progress: impl FnMut(usize, usize),
 ) -> bool {
     let Some(through) = ledger.backfill_through(today) else {
         return false;
     };
-    let Some(sweep) = backfill_corpus(claude_dir, &through, progress) else {
+    let Some(sweep) = backfill_corpus(claude_dir, &through, &mut progress) else {
         return false;
     };
     ledger.backfill_hours(&sweep.derived);
     true
 }
 
+/// Run the one-shot shape-classifier re-derive when the ledger still owes
+/// it: sweep the pre-watermark corpus (the same [`backfill_corpus`], whose
+/// parse now classifies + corrects per (file, model)) and hand it to
+/// [`crate::token_ledger::Ledger::rederive_shapes`] (exact-or-correct), which
+/// also marks the pass done. Returns whether the pass ran — i.e. whether a
+/// save should follow. Runs inside the worker's single tick, so it never
+/// overlaps the hourly backfill or the next 90s cycle.
+fn run_rederive(
+    claude_dir: &Path,
+    ledger: &mut crate::token_ledger::Ledger,
+    today: &str,
+    progress: impl FnMut(usize, usize),
+) -> bool {
+    let Some(through) = ledger.rederive_through(today) else {
+        return false;
+    };
+    let Some(sweep) = backfill_corpus(claude_dir, &through, progress) else {
+        return false;
+    };
+    ledger.rederive_shapes(&sweep.derived);
+    true
+}
+
 /// Persist the ledger after a merge: record newly-finalized days, then run
-/// the one-shot backfill. The backfill's save is independent of whether
-/// `record` changed anything — the done flag must persist even on an idle
-/// cycle, or the corpus re-sweeps every 90s until a day records.
+/// the one-shot v1→v2 backfill and the one-shot shape re-derive. Both saves
+/// are independent of whether `record` changed anything — a done flag must
+/// persist even on an idle cycle, or the corpus re-sweeps every 90s.
 fn persist_ledger(
     claude_dir: &Path,
     ledger: &mut crate::token_ledger::Ledger,
     dir: &Path,
     base: &TokenStats,
     today: &str,
-    progress: impl FnMut(usize, usize),
+    mut progress: impl FnMut(usize, usize),
 ) {
     if ledger.record(base, today) {
         ledger.save(dir);
     }
-    if run_backfill(claude_dir, ledger, today, progress) {
+    if run_backfill(claude_dir, ledger, today, &mut progress) {
+        ledger.save(dir);
+    }
+    if run_rederive(claude_dir, ledger, today, progress) {
         ledger.save(dir);
     }
 }

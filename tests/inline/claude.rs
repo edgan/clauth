@@ -10,6 +10,7 @@ fn creds(access: &str, refresh: Option<&str>) -> ClaudeCredentials {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     }
 }
@@ -1117,6 +1118,7 @@ fn installed_session_token_tracks_what_a_switch_installs() {
             expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
             scopes: Some(vec!["user:profile".into(), "user:inference".into()]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("stamp rolling");
@@ -2450,6 +2452,7 @@ fn stamp_rolling_token_writes_a_refreshless_long_lived_shape() {
             expires_at: Some(exp),
             scopes: Some(vec!["user:profile".into(), "user:inference".into()]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("feed");
@@ -2495,6 +2498,7 @@ fn first_stamp_preserves_the_mint_once_and_only_the_mint() {
         expires_at: Some(now + 8 * 3_600_000),
         scopes: None,
         subscription_type: Some("max".into()),
+        ..crate::profile::OAuthToken::default_extra()
     };
     stamp_rolling_token(&crate::profile::ProfileName::from(name), &fed("at-1")).expect("feed 1");
     stamp_rolling_token(&crate::profile::ProfileName::from(name), &fed("at-2")).expect("feed 2");
@@ -2546,6 +2550,7 @@ fn restore_static_mint_round_trip() {
             expires_at: Some(now + 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("feed");
@@ -2588,6 +2593,7 @@ fn write_session_token_with_backup_stamps_both_from_the_same_mint() {
             expires_at: Some(now + 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("feed preserves mint 1");
@@ -2637,6 +2643,7 @@ fn heal_misfilled_sidecar_quarantines_and_restores_the_mint() {
             expires_at: Some(now + 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("feed preserves mint");
@@ -2726,6 +2733,7 @@ fn refreshless(
         expires_at,
         scopes: scopes.map(|s| s.into_iter().map(String::from).collect()),
         subscription_type: plan.map(String::from),
+        ..crate::profile::OAuthToken::default_extra()
     }
 }
 
@@ -2833,6 +2841,7 @@ fn a_mint_in_its_final_month_is_still_preserved() {
                 "user:sessions:claude_code".to_string(),
             ]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -2852,6 +2861,7 @@ fn a_mint_in_its_final_month_is_still_preserved() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("roll");
@@ -2899,6 +2909,7 @@ fn a_rolling_bearer_is_never_preserved_as_the_mint() {
                 "user:profile".to_string(),
             ]),
             subscription_type: plan.map(String::from),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
 
@@ -2924,6 +2935,7 @@ fn a_rolling_bearer_is_never_preserved_as_the_mint() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("roll");
@@ -2956,6 +2968,7 @@ fn a_rolling_bearer_is_never_preserved_as_the_mint() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("roll 2");
@@ -2980,6 +2993,7 @@ fn quarantining_a_misfill_removes_the_sidecar() {
             expires_at: Some(crate::usage::now_ms() as i64 + 3_600_000),
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3030,6 +3044,7 @@ fn arming_from_disk_stamps_the_post_guard_chain_not_a_stale_snapshot() {
             expires_at: Some(now + life_h * 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
 
@@ -3046,6 +3061,7 @@ fn arming_from_disk_stamps_the_post_guard_chain_not_a_stale_snapshot() {
             expires_at: Some(now + 60_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3113,6 +3129,7 @@ fn arming_from_disk_skips_a_profile_cleared_while_it_waited() {
             expires_at: Some(now + 8 * 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     crate::profile::save_profile(&profile).expect("save");
@@ -3125,6 +3142,7 @@ fn arming_from_disk_skips_a_profile_cleared_while_it_waited() {
             expires_at: Some(now + 60_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3182,6 +3200,7 @@ fn a_restored_mint_is_preserved_again_on_the_next_roll() {
                 "user:sessions:claude_code".to_string(),
             ]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3217,6 +3236,7 @@ fn a_restored_mint_is_preserved_again_on_the_next_roll() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("re-roll");
@@ -3255,6 +3275,7 @@ fn arming_from_disk_rechecks_chain_staleness_after_the_guard_wait() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
 
@@ -3275,6 +3296,7 @@ fn arming_from_disk_rechecks_chain_staleness_after_the_guard_wait() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3326,6 +3348,7 @@ fn a_rotating_pair_classifies_misfilled_never_rolling() {
             "user:profile".to_string(),
         ]),
         subscription_type: Some("max".into()),
+        ..crate::profile::OAuthToken::default_extra()
     };
     assert_eq!(sidecar_kind_of(&with_refresh), SidecarKind::Misfilled);
     // And a mis-fill is never preserved as the mint, through the classifier
@@ -3350,6 +3373,7 @@ fn a_rotating_pair_classifies_misfilled_never_rolling() {
             expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("roll");
@@ -3384,6 +3408,7 @@ fn a_backup_that_is_not_a_mint_is_quarantined_never_restored() {
             expires_at: Some(now + 8 * 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("stamp");
@@ -3455,6 +3480,7 @@ fn an_expired_backup_is_never_restored() {
                 "user:sessions:claude_code".to_string(),
             ]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3472,6 +3498,7 @@ fn an_expired_backup_is_never_restored() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3540,6 +3567,7 @@ fn an_unreadable_sidecar_aborts_the_roll_instead_of_forfeiting_the_mint() {
             expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     );
     let err =
@@ -3579,6 +3607,7 @@ fn a_fresh_mint_replaces_an_expired_backup_on_the_next_roll() {
                 "user:sessions:claude_code".to_string(),
             ]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3606,6 +3635,7 @@ fn a_fresh_mint_replaces_an_expired_backup_on_the_next_roll() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("roll");
@@ -3646,6 +3676,7 @@ fn a_fresher_sidecar_mint_upgrades_a_live_but_older_backup() {
                 "user:sessions:claude_code".to_string(),
             ]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     let roll = || {
@@ -3660,6 +3691,7 @@ fn a_fresher_sidecar_mint_upgrades_a_live_but_older_backup() {
                     "user:profile".to_string(),
                 ]),
                 subscription_type: Some("max".into()),
+                ..crate::profile::OAuthToken::default_extra()
             },
         )
         .expect("roll");
@@ -3742,6 +3774,7 @@ fn preserve_quarantines_a_displaced_slot_holder_that_was_never_a_mint() {
                 "user:profile".to_string(),
             ]),
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         },
     )
     .expect("roll");
@@ -3788,6 +3821,7 @@ fn a_backup_inside_ccs_refresh_window_reads_as_expired() {
                 "user:sessions:claude_code".to_string(),
             ]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -3826,6 +3860,7 @@ fn restore_quarantines_a_misfilled_sidecar_before_overwriting_it() {
                 "user:sessions:claude_code".to_string(),
             ]),
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     std::fs::write(
@@ -4033,5 +4068,231 @@ fn a_publish_clears_a_read_only_destination() {
         fs::read(&link).expect("read the live path"),
         b"{}",
         "the live path resolves to the incoming store"
+    );
+}
+
+/// The carry's deciding rule: the item's login is adopted when its expiry
+/// strictly beats the store's, whatever top-level keys either side carries —
+/// the org-scoped `organizationUuid` anchor the carry used to consult is
+/// dropped, since no real blob holds one and the gate answered the org
+/// question, never the account one. Pinned on every platform because the fn
+/// is pure; the gated carry that consults it is macOS-only.
+#[test]
+fn the_carry_prefers_the_item_when_its_login_expires_later() {
+    let item = |expires: i64, org: Option<&str>| {
+        serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "item-access",
+                "refreshToken": "item-refresh",
+                "expiresAt": expires,
+            },
+            "organizationUuid": org,
+        })
+    };
+    let store = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "store-access",
+            "refreshToken": "store-refresh",
+            "expiresAt": 1000,
+        },
+        "organizationUuid": "org-store",
+    });
+
+    // The real-blob shape the old gate never fired on: no anchor on the item.
+    assert!(item_login_outranks_store(&item(2000, None), Some(&store)));
+    // A differing anchor used to refuse; it is gone from the deciding path,
+    // so expiry alone admits this cross-member CC-refreshed item.
+    assert!(item_login_outranks_store(
+        &item(2000, Some("org-other")),
+        Some(&store)
+    ));
+    // The same-account rescue the carry exists for keeps working.
+    assert!(item_login_outranks_store(
+        &item(2000, Some("org-store")),
+        Some(&store)
+    ));
+}
+
+#[test]
+fn the_carry_keeps_the_store_when_the_item_is_stale_or_tied() {
+    let stale_item = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "item-access",
+            "refreshToken": "item-refresh",
+            "expiresAt": 500,
+        },
+    });
+    let tied_item = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "item-access",
+            "refreshToken": "item-refresh",
+            "expiresAt": 1000,
+        },
+    });
+    let store = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "store-access",
+            "refreshToken": "store-refresh",
+            "expiresAt": 1000,
+        },
+    });
+    assert!(!item_login_outranks_store(&stale_item, Some(&store)));
+    // The `<=` boundary: a tie keeps the store, the carry must not revert it.
+    assert!(!item_login_outranks_store(&tied_item, Some(&store)));
+}
+
+#[test]
+fn the_carry_adopts_the_item_when_the_store_holds_no_expiry() {
+    let item = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "item-access",
+            "refreshToken": "item-refresh",
+            "expiresAt": 2000,
+        },
+    });
+    // An absent or torn store reads as holding no expiry, which the item's
+    // live pair beats — the rescue direction, never a skip.
+    assert!(item_login_outranks_store(&item, None));
+    assert!(item_login_outranks_store(
+        &item,
+        Some(&serde_json::json!({"torn": true}))
+    ));
+}
+
+#[test]
+fn the_carry_never_adopts_an_item_holding_no_expiry() {
+    let store = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "store-access",
+            "refreshToken": "store-refresh",
+            "expiresAt": 1000,
+        },
+    });
+    let no_expiry = serde_json::json!({
+        "claudeAiOauth": {"accessToken": "item-access", "refreshToken": "item-refresh"},
+    });
+    assert!(!item_login_outranks_store(&no_expiry, Some(&store)));
+    let no_login = serde_json::json!({"mcpOAuth": {}});
+    assert!(!item_login_outranks_store(&no_login, Some(&store)));
+}
+
+/// The namespaced service name is exactly what Claude Code computes for a
+/// config dir — the bare service, a `-`, then the first 8 hex chars of the
+/// SHA-256 of the dir's path string — pinned against literal digests so the
+/// hashed INPUT (the path string, not its bytes-with-NUL or `Debug` form),
+/// the slice width, and the prefix literal cannot drift. Pure and
+/// cross-platform: the macOS module that shells out against the name compiles
+/// nowhere else, so this is the suite that pins the rule (the
+/// `item_login_outranks_store` split).
+#[test]
+fn namespaced_keychain_service_hashes_the_dir_path() {
+    assert_eq!(
+        namespaced_keychain_service(Path::new("/tmp/clauth-name-fixture")),
+        "Claude Code-credentials-c56fc9bd"
+    );
+    assert_eq!(
+        namespaced_keychain_service(Path::new("/tmp/second-fixture-dir")),
+        "Claude Code-credentials-761072a6"
+    );
+}
+
+/// Every config dir gets its own service, and none of them is the bare item a
+/// global `claude` reads: the stale-runtime GC's delete guard admits only that
+/// shape, so the naming rule must never produce anything else.
+#[test]
+fn namespaced_keychain_service_is_dir_specific_and_never_bare() {
+    let one = namespaced_keychain_service(Path::new("/one"));
+    let two = namespaced_keychain_service(Path::new("/two"));
+    assert_ne!(one, two);
+    for name in [&one, &two] {
+        assert_eq!(
+            name.strip_prefix("Claude Code-credentials-")
+                .expect("namespaced service")
+                .len(),
+            8,
+            "the suffix is the 8-hex sha256 slice: {name}"
+        );
+        assert_ne!(*name, "Claude Code-credentials", "never the bare item");
+    }
+}
+
+/// The delete-side guard: only the bare service plus a `-` and EXACTLY eight
+/// hex digits names a per-config-dir item. Everything else is refused — the
+/// bare item itself (the operator's global login, which no GC path may touch)
+/// most importantly, and a short, long or non-hex suffix beside it, so a
+/// caller passing a hand-built name cannot reach an item it cannot explain.
+#[test]
+fn is_namespaced_keychain_service_admits_only_suffixed_hex() {
+    assert!(is_namespaced_keychain_service(
+        "Claude Code-credentials-c56fc9bd"
+    ));
+    assert!(!is_namespaced_keychain_service("Claude Code-credentials"));
+    assert!(!is_namespaced_keychain_service("Claude Code-credentials-"));
+    assert!(!is_namespaced_keychain_service(
+        "Claude Code-credentials-c56fc9b"
+    ));
+    assert!(!is_namespaced_keychain_service(
+        "Claude Code-credentials-c56fc9bd0"
+    ));
+    assert!(!is_namespaced_keychain_service(
+        "Claude Code-credentials-c56fc9zz"
+    ));
+    // The naming rule emits lowercase only (node's toString('hex') and Rust's
+    // {:02x} alike), so an uppercase twin is a hand-built name, not one the
+    // rule produced — the delete-side guard refuses it.
+    assert!(!is_namespaced_keychain_service(
+        "Claude Code-credentials-C56FC9BD"
+    ));
+    assert!(!is_namespaced_keychain_service("something-else"));
+}
+
+/// The census decision over one `security dump-keychain`-shaped text: only a
+/// NAMESPACED service that no live dir explains is collected. The bare item a
+/// global `claude` reads, a non-namespaced name, a `<NULL>` value and the
+/// account attribute (0x08) never are — and neither is a service a live dir
+/// derives. PURE over text so the decision is pinned on every platform; the
+/// `security` I/O it feeds is macOS-only (`keychain::census_namespaced_items`).
+#[test]
+fn the_census_collects_only_namespaced_services_no_live_dir_explains() {
+    let live = std::collections::BTreeSet::from(["Claude Code-credentials-c56fc9bd".to_string()]);
+    let dump = "\
+keychain: \"/Users/u/Library/Keychains/login.keychain-db\"
+version: 512
+class: \"genp\"
+attributes:
+    0x00000007 <blob>=\"Claude Code-credentials-c56fc9bd\"
+    0x00000008 <blob>=0x757775636C78786479  \"uwuclxdy\"
+class: \"genp\"
+attributes:
+    0x00000007 <blob>=\"Claude Code-credentials-deadbeef\"
+class: \"genp\"
+attributes:
+    0x00000007 <blob>=\"Claude Code-credentials\"
+class: \"genp\"
+attributes:
+    0x00000007 <blob>=<NULL>
+class: \"genp\"
+attributes:
+    0x00000007 <blob>=\"clauth-test-1234\"
+";
+    assert_eq!(
+        census_orphan_keychain_services(dump, &live),
+        vec!["Claude Code-credentials-deadbeef".to_string()],
+        "exactly the one namespaced service no live dir explains"
+    );
+    // With nothing live both namespaced services are orphans; the bare item
+    // and the non-namespaced name still never are.
+    assert_eq!(
+        census_orphan_keychain_services(dump, &std::collections::BTreeSet::new()).len(),
+        2,
+        "an empty live set collects every namespaced service in the dump"
+    );
+    assert!(
+        census_orphan_keychain_services(
+            "    0x00000007 <blob>=\"Claude Code-credentials-c56fc9bd\"\n",
+            &live
+        )
+        .is_empty(),
+        "a dump naming only a live dir's service collects nothing"
     );
 }

@@ -24,6 +24,7 @@ fn pair(access: &str, refresh: Option<&str>) -> ClaudeCredentials {
             expires_at: Some(1_900_000_000_000),
             scopes: Some(vec!["user:inference".to_string()]),
             subscription_type: Some("Pro".to_string()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     }
 }

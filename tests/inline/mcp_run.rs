@@ -1068,7 +1068,8 @@ fn background_fanout_refuses_a_keyless_member_before_writing_jobs() {
 //   3. happy path: a valid prompt returns `{is_error:false, result, ...}` parsed
 //      from `claude -p --output-format stream-json --verbose
 //      --include-partial-messages`, and the child inherits `CLAUTH_MCP_DEPTH=1`
-//      + `--strict-mcp-config`.
+//      + `--strict-mcp-config`, and every stream line's `session_id` equals the
+//      `--session-id` the spawn passed and `CLAUTH_DELEGATE_SESSION_ID` names.
 //   4. idle kill + salvage: the idle guard fires on stream SILENCE — no stdout
 //      line for `idle_secs`, counted per line by `read_stdout` — so a child stuck
 //      in a long tool call is NOT idle. Measured 2026-08-25: a foreground
@@ -1088,6 +1089,7 @@ fn delegate_env_strips_inherited_provider_routing() {
         &[],
         std::path::Path::new("/cfg"),
         0,
+        "sid-1",
     );
     let envs = crate::testutil::env_overrides(&cmd);
 
@@ -1107,6 +1109,11 @@ fn delegate_env_strips_inherited_provider_routing() {
     );
     assert_eq!(envs.get("CLAUTH_MCP_DEPTH"), Some(&Some("1".to_string())));
     assert_eq!(
+        envs.get("CLAUTH_DELEGATE_SESSION_ID"),
+        Some(&Some("sid-1".to_string())),
+        "the delegate's own session id is exported for hook exemptions",
+    );
+    assert_eq!(
         envs.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS"),
         Some(&Some(DEFAULT_MAX_OUTPUT_TOKENS.to_string())),
     );
@@ -1124,6 +1131,7 @@ fn delegate_env_strips_active_profile_custom_env() {
         &["FOO".to_string(), "BAR".to_string()],
         std::path::Path::new("/cfg"),
         0,
+        "s",
     );
     let envs = crate::testutil::env_overrides(&cmd);
     assert_eq!(
@@ -1144,6 +1152,11 @@ fn delegate_env_caller_reauthority_and_clauth_keys_win() {
     );
     // must NOT be able to defeat the depth guard,
     caller.insert("CLAUTH_MCP_DEPTH".to_string(), "0".to_string());
+    // nor hijack the exemption marker onto another session,
+    caller.insert(
+        "CLAUTH_DELEGATE_SESSION_ID".to_string(),
+        "spoofed-session".to_string(),
+    );
     // and a caller-set max-tokens is respected, not overwritten by the default.
     caller.insert(
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
@@ -1151,7 +1164,14 @@ fn delegate_env_caller_reauthority_and_clauth_keys_win() {
     );
 
     let mut cmd = Command::new("claude");
-    apply_delegate_env(&mut cmd, &caller, &[], std::path::Path::new("/cfg"), 0);
+    apply_delegate_env(
+        &mut cmd,
+        &caller,
+        &[],
+        std::path::Path::new("/cfg"),
+        0,
+        "sid-9",
+    );
     let envs = crate::testutil::env_overrides(&cmd);
 
     assert_eq!(
@@ -1168,6 +1188,36 @@ fn delegate_env_caller_reauthority_and_clauth_keys_win() {
         envs.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS"),
         Some(&Some("999".to_string())),
         "a caller-set max-tokens is not clobbered by the default",
+    );
+    assert_eq!(
+        envs.get("CLAUTH_DELEGATE_SESSION_ID"),
+        Some(&Some("sid-9".to_string())),
+        "the session-id marker always wins over a caller value",
+    );
+}
+
+#[test]
+fn a_resume_keeps_its_session_id_and_a_fresh_run_pins_a_new_one() {
+    assert_eq!(
+        delegate_session_id(Some("0f0e0d0c-1111-4222-8333-444455556666")).as_deref(),
+        Ok("0f0e0d0c-1111-4222-8333-444455556666"),
+        "a resume runs under the id it continues, so an exemption keyed on the \
+         exported id keeps covering it",
+    );
+    let a = delegate_session_id(None).expect("fresh id");
+    let b = delegate_session_id(None).expect("fresh id");
+    assert_ne!(a, b, "two fresh runs pin two different ids");
+    assert_eq!(a.len(), 36, "uuid shape: {a}");
+    for (i, c) in a.chars().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => assert_eq!(c, '-', "hyphen at byte {i}: {a}"),
+            _ => assert!(c.is_ascii_hexdigit(), "hex digit at byte {i}: {a}"),
+        }
+    }
+    assert_eq!(a.as_bytes()[14], b'4', "uuid v4 version nibble: {a}");
+    assert!(
+        "89ab".contains(a.chars().nth(19).expect("byte 19")),
+        "RFC 4122 variant nibble: {a}"
     );
 }
 
@@ -1207,6 +1257,7 @@ fn a_delegate_after_a_switch_off_does_not_pair_the_departed_key_with_the_target_
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     let target = crate::profile::Profile::new(
@@ -2998,7 +3049,11 @@ fn a_folded_live_usage_clause_dates_the_figure_it_carries() {
         );
     };
 
-    seed(240);
+    // 300 lands the figure on a 60s plateau: `humanize_duration` spells `5m` for
+    // 300..=359s, so the pin holds whatever the real gap between this stamp
+    // and the render's own `now` does to the floored second. 300 is well
+    // under `STALE_AFTER_MS` (2h), so this is still the fresh arm.
+    seed(300);
     let fresh = render::delegate_prose(&fold_delegate_live_usage(
         serde_json::json!({"is_error": false, "result": "ok"}),
         &crate::profile::ProfileName::from("work"),
@@ -3008,7 +3063,7 @@ fn a_folded_live_usage_clause_dates_the_figure_it_carries() {
         DigestMode::Skip,
     ));
     assert!(
-        fresh.contains("target `work`: 5h 12% used, 7d unknown (cached 4m ago)"),
+        fresh.contains("target `work`: 5h 12% used, 7d unknown (cached 5m ago)"),
         "the figure names the age of the cache it came from: {fresh}",
     );
 
@@ -4833,7 +4888,6 @@ fn the_profiles_entry_names_both_scopes_and_the_reply_shape() {
 #[test]
 fn roster_rank_reports_free_percent_from_the_best_known_window() {
     use crate::profile_cache::{THIRD_PARTY_CACHE_FILE, USAGE_CACHE_FILE, write_profile_cache};
-    use crate::providers::{ThirdPartyStats, UsageBar};
     use crate::usage::{UsageInfo, UsageWindow};
 
     let _home = HomeSandbox::new();
@@ -4874,20 +4928,16 @@ fn roster_rank_reports_free_percent_from_the_best_known_window() {
 
     // A third-party provider has no `windows`, but its own bars carry the same
     // percentages, and 5h still outranks 7d.
-    let bar = |label: &str, pct: f64| UsageBar {
-        label: label.to_string(),
-        pct,
-        resets_at: None,
-        used: None,
-        total: None,
-    };
     write_profile_cache(
         &crate::profile::ProfileName::from("bars"),
         THIRD_PARTY_CACHE_FILE,
         &ThirdPartyStats {
             is_available: true,
             rows: Vec::new(),
-            bars: vec![bar("7d", 94.0), bar("5h", 8.0)],
+            bars: vec![
+                crate::testutil::bar("7d", 94.0),
+                crate::testutil::bar("5h", 8.0),
+            ],
             plan: Some("pro".to_string()),
             endpoint: None,
             best_effort: false,
@@ -5204,6 +5254,54 @@ fn a_folded_live_usage_clause_gates_the_pct_fields_on_window_liveness() {
     assert_eq!(
         unstamped["live_usage"]["5h_used_pct"], 30.0,
         "no stamp is missing data, not a lapsed window: the row stays, the share stays",
+    );
+}
+
+/// An api-key account whose disk still holds a stale OAuth `usage_cache.json`
+/// from an earlier OAuth life ranks off its own provider bars, never the
+/// stale Anthropic window — the same stale-leftover read
+/// `profile_json::published_windows` guards against, and the reason
+/// `load_windows` answers nothing for an api-key account, dropping the rank
+/// onto the provider's own live bars.
+#[test]
+fn roster_rank_ignores_a_stale_oauth_cache_on_an_api_key_account() {
+    use crate::profile::{Profile, save_profile};
+    use crate::profile_cache::{THIRD_PARTY_CACHE_FILE, USAGE_CACHE_FILE, write_profile_cache};
+    use crate::usage::{UsageInfo, UsageWindow};
+
+    let _home = HomeSandbox::new();
+    let name = crate::profile::ProfileName::from("zai-x");
+    save_profile(&Profile::new(
+        "zai-x".to_string(),
+        Some("https://api.z.ai/api/anthropic".to_string()),
+        Some("k".to_string()),
+    ))
+    .expect("save the profile");
+    crate::testutil::register_names(&["zai-x"]);
+
+    // A leftover OAuth cache claiming a nearly-spent 5h window would rank the
+    // account Window(5.0) — the stale Anthropic figure, not this account's.
+    write_profile_cache(
+        &name,
+        USAGE_CACHE_FILE,
+        &UsageInfo {
+            five_hour: Some(UsageWindow {
+                utilization: 95.0,
+                resets_at: None,
+            }),
+            ..Default::default()
+        },
+    );
+    write_profile_cache(
+        &name,
+        THIRD_PARTY_CACHE_FILE,
+        &crate::testutil::stats_with_bars(vec![crate::testutil::bar("5h", 40.0)]),
+    );
+
+    assert_eq!(
+        roster_rank(&name),
+        RosterRank::Window(60.0),
+        "the provider bar answers, the stale OAuth window never reaches the rank",
     );
 }
 
@@ -7133,20 +7231,32 @@ fn the_listing_dates_every_state_by_the_stamp_that_state_makes_worth_reading() {
             .to_string()
     };
 
-    // A live run is dated by how long it has been GOING.
-    assert_eq!(
-        line("d-blk-0").trim(),
-        "job `d-blk-0` blocking on `acct` (its own caller takes the result), elapsed 2m 5s",
+    // A live run is dated by how long it has been GOING; a finished one by how
+    // long its result has been sitting there; an orphan by when anything last
+    // wrote to it. Each line is pinned to its state's age-clause opener — the
+    // whole-second figure is floored between one real clock read and another,
+    // so the figures themselves are pinned at the producer below, where the
+    // clock is the seed's own `now`.
+    assert!(
+        line("d-blk-0").trim().starts_with(
+            "job `d-blk-0` blocking on `acct` (its own caller takes the result), elapsed "
+        ),
+        "{}",
+        line("d-blk-0")
     );
-    // A finished one by how long its result has been sitting there.
-    assert_eq!(
-        line("d-fin-0").trim(),
-        "job `d-fin-0` done on `acct`, finished 1m 30s ago",
+    assert!(
+        line("d-fin-0")
+            .trim()
+            .starts_with("job `d-fin-0` done on `acct`, finished "),
+        "{}",
+        line("d-fin-0")
     );
-    // An orphan by when anything last wrote to it.
-    assert_eq!(
-        line("d-dead-0").trim(),
-        "job `d-dead-0` orphaned on `acct`; resume with session id `6cc9c767-1cc3-4e77-a787-a7f8a6d41515`, last seen 1d 0h ago",
+    assert!(
+        line("d-dead-0").trim().starts_with(
+            "job `d-dead-0` orphaned on `acct`; resume with session id `6cc9c767-1cc3-4e77-a787-a7f8a6d41515`, last seen "
+        ),
+        "{}",
+        line("d-dead-0")
     );
     // And the two dead ones carry no elapsed figure — asserted per LINE, so the
     // live row's own `elapsed` cannot satisfy it.
@@ -7178,6 +7288,19 @@ fn the_listing_dates_every_state_by_the_stamp_that_state_makes_worth_reading() {
             row.get("session_id").is_none(),
             "seeds that carry no session id keep the key absent"
         );
+    }
+    // The figures the prose can only pin as a range: exact here, at the
+    // seed's own `now`.
+    for (id, key, want) in [
+        ("d-blk-0", "elapsed_secs", 125_u64),
+        ("d-fin-0", "since_secs", 90_u64),
+        ("d-dead-0", "since_secs", jobs::RUNNING_TTL_MS / 1000 + 200),
+    ] {
+        let row = rows
+            .iter()
+            .find(|r| r["job_id"].as_str() == Some(id))
+            .unwrap();
+        assert_eq!(row[key], serde_json::json!(want), "{id} {key}: {payload}");
     }
 }
 
@@ -7224,8 +7347,6 @@ fn the_state_mode_lists_a_handed_off_jobs_id() {
         &jobs::RunningSpec {
             // The crossing is what separates these two on a handed-off record.
             recorded_at: now - 30_000,
-            // Half a second off a whole second, so the ms that pass between
-            // this stamp and the handler's own `now` cannot move the figure.
             ..running_spec("d-handedoff-0", "acct", now - 250_500)
         },
         now - 4_000,
@@ -7245,12 +7366,24 @@ fn the_state_mode_lists_a_handed_off_jobs_id() {
         "the abandoned run's id is what the caller came for: {text}"
     );
     assert!(
-        text.contains("running on `acct`"),
-        "with the account it is spending: {text}"
+        text.contains("running on `acct`, elapsed "),
+        "with the account it is spending, dated as the running row it is: {text}"
     );
-    assert!(
-        text.contains("elapsed 4m 10s"),
-        "and how long it has been going: {text}"
+    // The figure is pinned at the producer, where the clock is the seed's own
+    // `now`: the prose's whole-second render is floored between one real clock
+    // read and another, so over there it can only be pinned as a range.
+    let mut payload = serde_json::json!({});
+    fold_jobs_listing(&mut payload, now);
+    let row = payload["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["job_id"].as_str() == Some("d-handedoff-0"))
+        .unwrap();
+    assert_eq!(
+        row["elapsed_secs"],
+        serde_json::json!(250),
+        "4m 10s off the run's birth: {payload}"
     );
 }
 

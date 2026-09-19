@@ -1424,6 +1424,7 @@ fn acme_with_chain() -> crate::profile::Profile {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     acme
@@ -1990,6 +1991,7 @@ mod static_token_verdicts {
                     "user:profile".to_string(),
                 ]),
                 subscription_type: Some("max".into()),
+                ..crate::profile::OAuthToken::default_extra()
             },
         )
         .expect("stamp");
@@ -2050,6 +2052,7 @@ mod static_token_verdicts {
                     "user:sessions:claude_code".to_string(),
                 ]),
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         };
         std::fs::write(
@@ -2085,6 +2088,7 @@ mod static_token_verdicts {
                     "user:profile".to_string(),
                 ]),
                 subscription_type: Some("max".into()),
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         crate::profile::save_profile(&profile).expect("save profile");
@@ -2154,6 +2158,7 @@ mod static_token_verdicts {
                 expires_at: Some(crate::usage::now_ms() as i64 + 3_600_000),
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         crate::profile::save_profile(&profile).expect("save profile");
@@ -2188,6 +2193,7 @@ mod static_token_verdicts {
                 expires_at: Some(crate::usage::now_ms() as i64 + 3_600_000),
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         crate::profile::save_profile(&unusable).expect("save profile");
@@ -2268,6 +2274,7 @@ mod static_token_verdicts {
                     "user:sessions:claude_code".to_string(),
                 ]),
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         crate::profile::save_profile(&profile).expect("save profile");
@@ -2330,6 +2337,7 @@ mod static_token_verdicts {
                 expires_at: Some(crate::usage::now_ms() as i64 + 3_600_000),
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         };
         std::fs::write(
@@ -2364,6 +2372,7 @@ mod static_token_verdicts {
                     "user:sessions:claude_code".to_string(),
                 ]),
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         };
         std::fs::write(
@@ -2391,6 +2400,7 @@ mod static_token_verdicts {
                     "user:sessions:claude_code".to_string(),
                 ]),
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         };
         std::fs::write(
@@ -2623,6 +2633,7 @@ mod static_token_clear {
                     expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
                     scopes: None,
                     subscription_type: None,
+                    ..crate::profile::OAuthToken::default_extra()
                 }),
             });
         }
@@ -2658,6 +2669,7 @@ mod static_token_clear {
                     "user:profile".to_string(),
                 ]),
                 subscription_type: Some("max".into()),
+                ..crate::profile::OAuthToken::default_extra()
             },
         )
         .expect("stamp");
@@ -2723,6 +2735,7 @@ mod static_token_clear {
                         expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
                         scopes: None,
                         subscription_type: None,
+                        ..crate::profile::OAuthToken::default_extra()
                     }),
                 })
                 .expect("serialize login"),
@@ -2924,6 +2937,7 @@ mod static_token_clear {
                     expires_at: Some(crate::usage::now_ms() as i64 + 8 * 3_600_000),
                     scopes: None,
                     subscription_type: None,
+                    ..crate::profile::OAuthToken::default_extra()
                 }),
             })
             .expect("ser"),

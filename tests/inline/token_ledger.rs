@@ -12,6 +12,7 @@ fn split(model: &str, input: u64, output: u64, cache_read: u64, cache_create: u6
         output,
         cache_read,
         cache_create,
+        shape: Default::default(),
     }
 }
 
@@ -404,6 +405,7 @@ fn v1_ledger_without_flag_loads_backfill_pending() {
                 output: 50,
                 cache_read: 20,
                 cache_create: 10,
+                shape: Default::default(),
                 hours: Some(
                     [WireHour {
                         input: 100,
@@ -464,6 +466,7 @@ fn backfill_hours_fills_only_exact_matches() {
                     output: 50,
                     cache_read: 20,
                     cache_create: 10,
+                    shape: Default::default(),
                     hours: None,
                 },
             ),
@@ -474,6 +477,7 @@ fn backfill_hours_fills_only_exact_matches() {
                     output: 3,
                     cache_read: 0,
                     cache_create: 0,
+                    shape: Default::default(),
                     hours: None,
                 },
             ),
@@ -487,6 +491,7 @@ fn backfill_hours_fills_only_exact_matches() {
                     output: 3,
                     cache_read: 0,
                     cache_create: 0,
+                    shape: Default::default(),
                     hours: None,
                 },
             ),
@@ -497,6 +502,7 @@ fn backfill_hours_fills_only_exact_matches() {
                     output: 3,
                     cache_read: 0,
                     cache_create: 0,
+                    shape: Default::default(),
                     hours: None,
                 },
             ),
@@ -507,6 +513,7 @@ fn backfill_hours_fills_only_exact_matches() {
                     output: 3,
                     cache_read: 0,
                     cache_create: 0,
+                    shape: Default::default(),
                     hours: None,
                 },
             ),
@@ -517,6 +524,7 @@ fn backfill_hours_fills_only_exact_matches() {
                     output: 9,
                     cache_read: 0,
                     cache_create: 0,
+                    shape: Default::default(),
                     hours: Some(v2h),
                 },
             ),

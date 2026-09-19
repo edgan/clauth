@@ -219,6 +219,7 @@ fn switch_replaces_active_account_mirror_without_refusing() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         crate::profile::save_profile(&p).expect("save profile");
@@ -274,6 +275,7 @@ fn two_profiles_active_on_one() -> AppConfig {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         crate::profile::save_profile(&p).expect("save profile");
@@ -415,6 +417,7 @@ fn switch_to_a_missing_profile_bails_before_touching_the_live_link() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     crate::profile::save_profile(&p).expect("save profile");
@@ -471,6 +474,7 @@ fn switch_profile_refuses_a_target_deleted_on_disk() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         save_profile(&p).expect("save profile");
@@ -595,6 +599,7 @@ fn auto_switch_if_needed_walks_off_a_broken_active() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         });
         p.usage = Some(UsageInfo {
@@ -663,6 +668,7 @@ fn auto_switch_if_needed_hops_off_a_scoped_blocked_active() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     let mk = |name: &str, scoped: Vec<ScopedWindow>| {
@@ -747,6 +753,7 @@ fn auto_switch_if_needed_does_not_hop_a_scoped_blocked_active_onto_a_canceled_me
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     let mut a = Profile::new("a".to_string(), None, None);
@@ -836,6 +843,7 @@ fn auto_switch_if_needed_keeps_a_scoped_blocked_sink_parked() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
     let mut a = Profile::new("a".to_string(), None, None);
@@ -1327,6 +1335,7 @@ fn overwrite_captured_profile_keeps_config_and_history_swaps_credentials() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&target).expect("save target");
@@ -1367,6 +1376,7 @@ fn overwrite_captured_profile_keeps_config_and_history_swaps_credentials() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }),
         base_url: Some("https://api.example.com".to_string()),
@@ -1478,6 +1488,7 @@ fn browser_reauth_on_a_third_party_profile_keeps_its_endpoint_and_key() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }
     }
@@ -1601,6 +1612,7 @@ fn a_switch_after_a_switch_off_does_not_inherit_the_departed_accounts_env() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     let mut incoming = Profile::new(
@@ -1669,6 +1681,7 @@ fn browser_reauth_keeps_a_generic_endpoint_and_key() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }
     }
@@ -1797,6 +1810,7 @@ fn an_env_token_profiles_endpoint_survives_reauth_and_the_next_load() {
                         expires_at: None,
                         scopes: None,
                         subscription_type: None,
+                        ..crate::profile::OAuthToken::default_extra()
                     }),
                 }),
                 base_url: None,
@@ -1866,6 +1880,7 @@ fn the_auto_activate_arm_writes_a_preserved_endpoint_into_the_live_settings() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&ds).expect("save ds");
@@ -1908,6 +1923,7 @@ fn the_auto_activate_arm_writes_a_preserved_endpoint_into_the_live_settings() {
                     expires_at: None,
                     scopes: None,
                     subscription_type: None,
+                    ..crate::profile::OAuthToken::default_extra()
                 }),
             }),
             base_url: None,
@@ -1965,6 +1981,7 @@ fn a_fresh_capture_after_a_switch_off_strips_the_departed_accounts_env() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&departing).expect("save departing");
@@ -2033,6 +2050,7 @@ fn a_tui_create_account_after_a_switch_off_strips_the_departed_accounts_env() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&departing).expect("save departing");
@@ -2068,6 +2086,7 @@ fn a_tui_create_account_after_a_switch_off_strips_the_departed_accounts_env() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         },
         None,
@@ -2209,6 +2228,7 @@ fn browser_reauth_does_not_keep_an_endpoint_with_no_key_behind_it() {
                     expires_at: None,
                     scopes: None,
                     subscription_type: None,
+                    ..crate::profile::OAuthToken::default_extra()
                 }),
             }),
             base_url: None,
@@ -2253,6 +2273,7 @@ fn browser_reauth_on_an_active_third_party_profile_keeps_the_live_endpoint() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&ds).expect("save ds");
@@ -2278,6 +2299,7 @@ fn browser_reauth_on_an_active_third_party_profile_keeps_the_live_endpoint() {
                     expires_at: None,
                     scopes: None,
                     subscription_type: None,
+                    ..crate::profile::OAuthToken::default_extra()
                 }),
             }),
             base_url: None,
@@ -2320,6 +2342,7 @@ fn overwrite_still_replaces_the_endpoint_set_outside_the_preserve_arm() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     let ds = Profile::new(
@@ -2349,6 +2372,7 @@ fn overwrite_still_replaces_the_endpoint_set_outside_the_preserve_arm() {
                     expires_at: None,
                     scopes: None,
                     subscription_type: None,
+                    ..crate::profile::OAuthToken::default_extra()
                 }),
             }),
             base_url: None,
@@ -2421,6 +2445,7 @@ fn a_credentials_less_recapture_still_drops_the_stored_chain() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&acme).expect("save acme");
@@ -2576,6 +2601,7 @@ fn login_snapshot(refresh: &str, account_uuid: Option<&str>) -> CaptureSnapshot 
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }),
         base_url: None,
@@ -2653,6 +2679,7 @@ fn foreign_plain_live_login() -> std::path::PathBuf {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         })
         .expect("serialize live login"),
@@ -2758,6 +2785,7 @@ fn first_create_from_login_over_a_foreign_live_login_refuses_and_rolls_back() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
 
@@ -2886,6 +2914,7 @@ fn capture_beside_an_active_account_leaves_the_active_alone() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         })
         .expect("serialize live login"),
@@ -2899,6 +2928,7 @@ fn capture_beside_an_active_account_leaves_the_active_alone() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&first).expect("save first");
@@ -2931,6 +2961,7 @@ fn capture_current_login_refuses_a_login_an_existing_profile_owns() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&owner).expect("save owner");
@@ -3129,6 +3160,7 @@ fn overwrite_captured_profile_clears_auth_broken_quarantine() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }),
         base_url: None,
@@ -3171,6 +3203,7 @@ fn overwrite_captured_profile_reapplies_live_state_when_active() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&acme).expect("save acme");
@@ -3246,6 +3279,7 @@ fn overwriting_the_active_profile_replaces_a_regular_live_file() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&acme).expect("save acme");
@@ -3283,6 +3317,7 @@ fn overwriting_the_active_profile_replaces_a_regular_live_file() {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }),
         base_url: None,
@@ -3327,6 +3362,7 @@ fn overwriting_the_active_profile_with_no_credentials_clears_a_regular_live_file
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&acme).expect("save acme");
@@ -4146,6 +4182,7 @@ fn enable_clears_the_flag_leaving_everything_else_byte_identical() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&profile).expect("save profile");
@@ -4374,6 +4411,7 @@ fn clear_profile_credentials_blanks_active_profile_keeping_shell() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
     save_profile(&acct).expect("save acct");
@@ -4467,6 +4505,7 @@ fn clear_profile_credentials_non_active_and_no_sidecar_resurrection() {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     };
 
@@ -4672,6 +4711,7 @@ fn oauth_creds(access: &str) -> crate::profile::ClaudeCredentials {
             expires_at: None,
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     }
 }
@@ -4746,6 +4786,7 @@ fn switch_cli_refuses_dead_target_with_login_hint() {
             expires_at: Some(1), // epoch-ms 1 → long expired
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     });
 
@@ -4784,6 +4825,7 @@ mod identify_live_login_owner {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }
     }
@@ -4978,6 +5020,7 @@ mod identify_live_login_owner {
                 expires_at: None,
                 scopes: None,
                 subscription_type: None,
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }
     }
@@ -5083,6 +5126,111 @@ fn a_console_login_stores_the_session_and_leaves_the_api_key_alone() {
         .expect("load_profile");
     assert_eq!(loaded.api_key, None, "no key is written into an empty slot");
     assert!(loaded.console.is_some(), "the session still landed");
+}
+
+/// The endpoint edit drops the third-party DISK cache with the in-memory
+/// stats: `bootstrap_third_party` reseeds a leftover cache `Fresh` on the
+/// restart/boot paths, and the usage-store mirror drives the auto-switch
+/// walk off the reseed. A live process's in-memory mirror entry survives
+/// until the profile's next fetch — the boundary the src comment names.
+#[test]
+fn an_endpoint_edit_drops_the_third_party_disk_cache() {
+    let _home = HomeSandbox::new();
+    let stats = || crate::testutil::stats_with_bars(vec![crate::testutil::bar("5h", 80.0)]);
+    let cache = |name: &str| {
+        crate::profile_cache::load_profile_cache::<crate::providers::ThirdPartyStats>(
+            &crate::profile::ProfileName::from(name),
+            crate::profile_cache::THIRD_PARTY_CACHE_FILE,
+        )
+    };
+
+    // A provider change drops it.
+    let p = Profile::new(
+        "cache-moved".to_string(),
+        Some("https://api.minimax.io/anthropic".to_string()),
+        Some("sk-cp-k".to_string()),
+    );
+    crate::profile::save_profile(&p).expect("save the profile");
+    crate::testutil::register_names(&["cache-moved", "cache-rotated"]);
+    crate::profile_cache::write_profile_cache(
+        &crate::profile::ProfileName::from("cache-moved"),
+        crate::profile_cache::THIRD_PARTY_CACHE_FILE,
+        &stats(),
+    );
+    assert!(
+        cache("cache-moved").is_some(),
+        "the fixture wrote the old provider's cache"
+    );
+    let mut config = inactive_config(p);
+    edit_profile_endpoint(
+        &mut config,
+        &crate::profile::ProfileName::from("cache-moved"),
+        Some("https://api.z.ai/api/anthropic".to_string()),
+        Some("zai-key".to_string()),
+    )
+    .expect("edit_profile_endpoint");
+    assert!(
+        cache("cache-moved").is_none(),
+        "the old provider's cache does not survive the move"
+    );
+
+    // …and so does a rotated key on the SAME provider — the stats were
+    // fetched under a credential just replaced.
+    let p = Profile::new(
+        "cache-rotated".to_string(),
+        Some("https://api.minimax.io/anthropic".to_string()),
+        Some("sk-cp-k".to_string()),
+    );
+    crate::profile::save_profile(&p).expect("save the profile");
+    crate::profile_cache::write_profile_cache(
+        &crate::profile::ProfileName::from("cache-rotated"),
+        crate::profile_cache::THIRD_PARTY_CACHE_FILE,
+        &stats(),
+    );
+    let mut config = inactive_config(p);
+    edit_profile_endpoint(
+        &mut config,
+        &crate::profile::ProfileName::from("cache-rotated"),
+        Some("https://api.minimax.io/anthropic".to_string()),
+        Some("sk-cp-rotated".to_string()),
+    )
+    .expect("edit_profile_endpoint");
+    assert!(
+        cache("cache-rotated").is_none(),
+        "a rotated key drops the stats fetched under the old one"
+    );
+
+    // The preset-apply path moves the endpoint without touching the key, and
+    // its own comment claims it re-derives the provider "exactly like
+    // `edit_profile_endpoint`" — the cache drop has to hold there too.
+    let p = Profile::new(
+        "cache-preset".to_string(),
+        Some("https://api.minimax.io/anthropic".to_string()),
+        Some("sk-cp-k".to_string()),
+    );
+    crate::profile::save_profile(&p).expect("save the profile");
+    crate::testutil::register_names(&["cache-preset"]);
+    crate::profile_cache::write_profile_cache(
+        &crate::profile::ProfileName::from("cache-preset"),
+        crate::profile_cache::THIRD_PARTY_CACHE_FILE,
+        &stats(),
+    );
+    assert!(
+        cache("cache-preset").is_some(),
+        "the fixture wrote the old provider's cache"
+    );
+    let mut config = inactive_config(p);
+    edit_profile_preset(
+        &mut config,
+        &crate::profile::ProfileName::from("cache-preset"),
+        Some("https://api.z.ai/api/anthropic".to_string()),
+        crate::profile::ModelSettings::default(),
+    )
+    .expect("edit_profile_preset");
+    assert!(
+        cache("cache-preset").is_none(),
+        "a preset that moves the endpoint drops the old provider's cache"
+    );
 }
 
 /// `main.rs`'s reauth contract is that the snapshot clears the old type's

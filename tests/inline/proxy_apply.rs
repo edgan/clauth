@@ -22,6 +22,7 @@ fn creds(access: &str) -> crate::profile::ClaudeCredentials {
             expires_at: Some(1_900_000_000_000),
             scopes: None,
             subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
         }),
     }
 }

@@ -1589,6 +1589,21 @@ fn draw_model_detail(
         ]
     };
 
+    // The shape marker: a provider whose usage rows never report cache
+    // writes. Rendered on the split-complete detail only, right after the
+    // split rows it qualifies, so no corrected figure reads unmarked.
+    if m.split_complete
+        && matches!(
+            s.shape,
+            crate::tokens::UsageShape::WholePromptInput | crate::tokens::UsageShape::NoCacheWrites
+        )
+    {
+        lines.push(Line::from(Span::styled(
+            "cache write not reported",
+            theme::faint(),
+        )));
+    }
+
     // API-equivalent cost, split by token bucket (rates differ per bucket).
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(

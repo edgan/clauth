@@ -178,6 +178,41 @@ fn drain_rate_covers_third_party_windows_from_avg_pace() {
     );
 }
 
+/// A SEEDED third-party 5h window — `profile.usage` filled by the mirror the
+/// scheduler runs on provider-derived windows — must still rate from the
+/// window's own average pace: no third-party leg ever appends
+/// `usage_history.jsonl`, so the recency-weighted branch would resolve no rate
+/// at all and the countdown would lose the drain hue the bar-synthesized form
+/// carries. The guard is the cache-family predicate, not `usage.is_none()`.
+#[test]
+fn drain_rate_seeded_third_party_window_keeps_avg_pace() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut p = third_party_profile(60.0, 30.0);
+    p.usage = Some(UsageInfo {
+        five_hour: Some(crate::usage::UsageWindow {
+            utilization: 60.0,
+            resets_at: Some(reset_in(9_000)),
+        }),
+        seven_day: None,
+        ..Default::default()
+    });
+    let config = config_with(vec![p], None, vec![]);
+    let app = App::new(config);
+    let profile = &app.config().profiles[0];
+    let w = profile.usage.as_ref().unwrap().five_hour.clone().unwrap();
+    let rate = drain_rate(
+        &app,
+        &crate::profile::ProfileName::from("tp"),
+        profile,
+        LABEL_5H,
+        &w,
+    )
+    .expect("the avg pace answers for a seeded third-party window");
+    // 60% over the 2.5h elapsed half of a 5h window is past its 50% ideal
+    // line, so the cap applies: 70 / 3h ≈ 23.3 %/h, never `None`.
+    assert!((rate - 23.333).abs() < 0.1, "5h rate in %/h: {rate}");
+}
+
 /// An OAuth 5h window keeps the recency-weighted recent burn, not the avg pace:
 /// with no history recorded, it stays uncolored rather than falling back.
 #[test]
@@ -439,6 +474,59 @@ fn partially_exhausted_chain_hides_resumes_hint() {
     assert!(
         resumes_line(&lines).is_none(),
         "must not show when the chain isn't fully exhausted"
+    );
+}
+
+/// A wallet-bearing active shows its runway beside the chain caption: the
+/// funded balance, its burn rate, and however long the two hold — the wallet
+/// sibling of the switch projection. No threshold, no warning hue; the
+/// operator judges the figure.
+#[test]
+fn a_wallet_bearing_active_shows_its_drains_line() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let ds = deepseek_profile("ds", &["63.34 CNY"]);
+    let config = config_with(vec![ds], Some("ds"), vec!["ds"]);
+    let mut app = App::new(config);
+    let now = crate::usage::now_ms();
+    // A dense hourly series for the funded wallet, falling 4.5 CNY/h —
+    // chronological, the order `load_wallet_history` hands the cache.
+    app.wallet_cache.insert(
+        "ds".to_string(),
+        (1..=12u64)
+            .rev()
+            .map(|hours_ago| crate::usage::WalletSample {
+                ts: now - hours_ago * 3_600_000,
+                label: "api balance".to_string(),
+                amount: 63.34 + 4.5 * hours_ago as f64,
+                currency: "CNY".to_string(),
+            })
+            .collect(),
+    );
+    let lines = fallback_flow_lines(&app, 60);
+    let drains = lines
+        .iter()
+        .map(line_text)
+        .find(|t| t.contains("drains in ~"))
+        .expect("a wallet-bearing active shows its runway");
+    assert!(
+        drains.contains("api balance drains in ~"),
+        "the line names the wallet it measures: {drains}"
+    );
+}
+
+/// An active with no balance series shows no drains line — a cold series is
+/// not a runway claim.
+#[test]
+fn a_wallet_bearing_active_without_a_series_shows_no_drains_line() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let ds = deepseek_profile("ds", &["63.34 CNY"]);
+    let config = config_with(vec![ds], Some("ds"), vec!["ds"]);
+    let app = App::new(config);
+    let lines = fallback_flow_lines(&app, 60);
+    assert!(
+        !lines.iter().map(line_text).any(|t| t.contains("drains in")),
+        "no series, no runway: {:?}",
+        lines.iter().map(line_text).collect::<Vec<_>>()
     );
 }
 
@@ -772,6 +860,7 @@ fn credentialed_profile(name: &str, subscription_type: &str) -> Profile {
                 expires_at: None,
                 scopes: None,
                 subscription_type: Some(subscription_type.into()),
+                ..crate::profile::OAuthToken::default_extra()
             }),
         }),
         usage: None,
@@ -902,6 +991,7 @@ fn oauth_creds() -> ClaudeCredentials {
             expires_at: None,
             scopes: None,
             subscription_type: Some("max".into()),
+            ..crate::profile::OAuthToken::default_extra()
         }),
     }
 }
